@@ -1,0 +1,4339 @@
+local sdk = sdk
+local log_prefix_venom = "[VenomDetector] "
+local log_prefix_effect = "[EffectContainerHook] "
+local schedule_effect 
+local spawn_and_paint_effect
+local attacker = 1 
+sleepOk = setmetatable({}, { __mode = "k" })
+FireOk = setmetatable({}, { __mode = "k" })
+fireDmg = setmetatable({}, { __mode = "k" })
+IceOk = setmetatable({}, { __mode = "k" })
+baseAtk = setmetatable({}, { __mode = "k" })
+
+local dragaoTime = setmetatable({}, { __mode = "k" })
+local addDragao = setmetatable({}, { __mode = "k" })
+local aguardando_hitdata = {}
+cond_dragao_active = cond_dragao_active or {}
+cond_dragao_last_time = cond_dragao_last_time or {}
+local dragao = setmetatable({}, { __mode = "k" })
+local atvdragao = setmetatable({}, { __mode = "k" })
+local cond_dragao = setmetatable({}, { __mode = "k" })
+local drageffect = setmetatable({}, { __mode = "k" })
+
+BlastDmg = setmetatable({}, { __mode = "k" })
+actBnew = setmetatable({}, { __mode = "k" })
+actBold = setmetatable({}, { __mode = "k" })
+
+contPA = setmetatable({}, { __mode = "k" })
+timerPA = setmetatable({}, { __mode = "k" })
+
+timeP = setmetatable({}, { __mode = "k" })
+addL = setmetatable({}, { __mode = "k" })
+addB = setmetatable({}, { __mode = "k" })
+_G.OnQuestReset = _G.OnQuestReset or {}
+local function EmitQuestReset()
+
+    for _, fn in pairs(_G.OnQuestReset) do
+        pcall(fn)
+    end
+end
+
+
+local function ResetQuestState()
+
+    attacker = 0
+
+    -- weak tables → recriar
+    sleepOk  = setmetatable({}, { __mode = "k" })
+    FireOk   = setmetatable({}, { __mode = "k" })
+    fireDmg  = setmetatable({}, { __mode = "k" })
+    IceOk    = setmetatable({}, { __mode = "k" })
+    baseAtk  = setmetatable({}, { __mode = "k" })
+
+    dragaoTime = setmetatable({}, { __mode = "k" })
+    addDragao  = setmetatable({}, { __mode = "k" })
+    dragao     = setmetatable({}, { __mode = "k" })
+    atvdragao  = setmetatable({}, { __mode = "k" })
+    cond_dragao= setmetatable({}, { __mode = "k" })
+    drageffect= setmetatable({}, { __mode = "k" })
+
+    BlastDmg = setmetatable({}, { __mode = "k" })
+    actBnew  = setmetatable({}, { __mode = "k" })
+    actBold  = setmetatable({}, { __mode = "k" })
+
+    contPA = setmetatable({}, { __mode = "k" })
+    timerPA = setmetatable({}, { __mode = "k" })
+
+    timeP = setmetatable({}, { __mode = "k" })
+    addL  = setmetatable({}, { __mode = "k" })
+    addB  = setmetatable({}, { __mode = "k" })
+
+    aguardando_hitdata = {}
+
+    cond_dragao_active = {}
+    cond_dragao_last_time = {}
+
+    schedule_effect = nil
+    spawn_and_paint_effect = nil
+
+end
+local last_active = nil
+
+local quest_hook_installed = false
+
+local function install_quest_hook()
+    if quest_hook_installed then return end
+
+    local qm_td = sdk.find_type_definition("snow.QuestManager")
+    if not qm_td then
+        return
+    end
+
+    local method = qm_td:get_method("getActiveQuestUniqueNo")
+    if not method then
+        return
+    end
+
+    sdk.hook(
+        method,
+        function(args)
+            return args
+        end,
+        function(retval)
+            local qm = sdk.get_managed_singleton("snow.QuestManager")
+            if not qm then return retval end
+
+            local active = qm:call("isActiveQuest")
+
+            -- primeira execução
+            if last_active == nil then
+                last_active = active
+                return retval
+            end
+
+            -- TRANSIÇÃO: quest acabou
+            if last_active == true and active == false then
+                ResetQuestState()
+                EmitQuestReset()      
+            end
+
+            last_active = active
+            return retval
+        end
+    )
+
+
+    quest_hook_installed = true
+end
+
+install_quest_hook()
+
+
+
+
+local blighted_enabled = false
+local blighted_hook_installed = false
+local ELEMENT_TO_CONDITION = {
+    [3] = 9,   -- Fire
+    [4] = 8,   -- Water
+    [5] = 10,  -- Thunder
+    [6] = 11   -- Ice
+}
+function EnableBlightedElement(enable)
+    blighted_enabled = enable
+
+    -- instala o hook apenas UMA vez
+    if blighted_hook_installed then
+        return
+    end
+
+    blighted_hook_installed = true
+
+    local EnemyCharacterBase =
+        sdk.find_type_definition("snow.enemy.EnemyCharacterBase")
+    if not EnemyCharacterBase then
+        return
+    end
+
+    local stockDamage_method =
+        EnemyCharacterBase:get_method("stockDamage")
+    if not stockDamage_method then
+        return
+    end
+
+    sdk.hook(
+        stockDamage_method,
+
+        function(args)
+            
+            if not blighted_enabled then
+                return
+            end
+
+            -- args[3] = DamageParam
+            local damage_param = sdk.to_managed_object(args[3])
+            if not damage_param then
+                return
+            end
+
+            local ok_et, element_type = pcall(function()
+                return damage_param:call("get_ElementType")
+            end)
+            if not ok_et then
+                return
+            end
+
+            local condition_type =
+                ELEMENT_TO_CONDITION[element_type]
+            if not condition_type then
+                return
+            end
+
+            local ok_vital, vital_damage = pcall(function()
+                return damage_param:call("get_ElementPartsVitalDamage")
+            end)
+            if not ok_vital or not vital_damage then
+                return
+            end
+
+            local ok_attacker, attacker = pcall(function()
+                return damage_param:call("get_DamageAttackerType")
+            end)
+            if attacker == 0 then
+                pcall(function()
+                    damage_param:call(
+                        "set_ConditionDamageType",
+                        condition_type
+                    )
+                    damage_param:call(
+                        "set_ConditionDamage",
+                        vital_damage * 0.25
+                    )
+                end)
+            end
+            args[3] = sdk.to_ptr(damage_param)
+        end,
+
+        function(retval)
+            return retval
+        end
+    )
+end
+
+
+
+function AplicaMultiplicadorElemental(enemy, damage, mult)
+    if not enemy or not damage then return end
+    mult = mult or 10
+
+    local elementType = damage:call("get_ElementType()")
+
+    local elemDmg = damage:call("get_ElementDamage()")
+
+
+    if not elemDmg then return end
+
+
+    if FireOk[enemy] == true and elementType == 3 then
+        damage:call(
+            "set_ElementDamage(System.Single)",
+            elemDmg * 1.15
+        )
+    end
+
+   
+    if IceOk[enemy] == true then
+        if elementType ~= 5 then
+            damage:call("set_ElementType", 5) -- gelo
+            damage:call("set_ConditionDamageType", 10)
+            damage:call("set_ConditionDamage",1.0)
+
+            local phys = damage:call("get_PhysicalDamage()") or 0
+            local physele= phys * 0.30
+            local elementalDamage = damage:call("get_ElementDamage()") or 0
+            
+            damage:call(
+                "set_ElementDamage(System.Single)",elementalDamage + physele)
+        end        
+    end
+
+    if drageffect[enemy] == 1 then
+        damage:call(
+            "set_ElementDamage(System.Single)",
+            elemDmg * 1.5
+        )
+
+    end
+end
+
+function OnEnemyStockDamage(args)
+    local enemy = sdk.to_managed_object(args[2])
+    if not enemy then return end
+
+    if FireOk[enemy] ~= true and IceOk[enemy] ~= true and drageffect[enemy]~= 1 then
+        return
+    end
+
+    local damage = sdk.to_managed_object(args[3])
+    if not damage then return end
+
+    AplicaMultiplicadorElemental(enemy, damage, 10)
+
+    args[3] = sdk.to_ptr(damage)
+end
+
+function CriarHookElemental()
+    if _G.ElementHookCreated then return end
+
+    local enemyType = sdk.find_type_definition("snow.enemy.EnemyCharacterBase")
+    if not enemyType then return end
+
+    local method = enemyType:get_method("stockDamage")
+    if not method then return end
+
+    sdk.hook(method, OnEnemyStockDamage)
+
+    _G.ElementHookCreated = true
+    _G.ElementHookEnabled = true
+
+end
+function SetElementHookEnabled(state)
+    _G.ElementHookEnabled = state
+end
+
+
+
+
+
+
+
+
+_G.enemy_status_cache = _G.enemy_status_cache or {}
+
+function get_enemy_key(enemy)
+    local uid = enemy:get_field("<UniqueId>k__BackingField")
+    if not uid then return nil end
+    return tostring(uid)
+end
+
+--/ERRO
+function compare_enemy_stock(enemy, statusName)
+    local key = get_enemy_key(enemy)
+    if not key then return nil end
+
+    local data = read_enemy_status(enemy, statusName)
+    if not data then return nil end
+
+    _G.enemy_status_cache[key] = _G.enemy_status_cache[key] or {}
+    local cache = _G.enemy_status_cache[key]
+
+    cache[statusName] = cache[statusName] or {
+        player = data.stock.player,
+        wirebug = data.stock.wirebug
+    }
+
+    local last = cache[statusName]
+
+    local delta = {
+        player = data.stock.player - last.player,
+        wirebug = data.stock.wirebug - last.wirebug
+    }
+
+    -- Atualiza cache
+    last.player  = data.stock.player
+    last.wirebug = data.stock.wirebug
+
+    return data, delta
+end
+function read_enemy_status(enemy, statusName)
+    if not enemy or not sdk.is_managed_object(enemy) then
+        return nil
+    end
+
+    local damage_param = enemy:get_field("<DamageParam>k__BackingField")
+    if not damage_param then
+        return nil
+    end
+
+    local param = damage_param:get_field(statusName)
+    if not param then
+        return nil
+    end
+
+    -- Função auxiliar para arrays player / wirebug
+    local function read_array(func)
+        local ok, arr = pcall(function()
+            return param:call(func)
+        end)
+
+        local out = { player = 0, wirebug = 0 }
+
+        if not ok or not arr then
+            return out
+        end
+
+        if not sdk.is_managed_object(arr) then
+            return out
+        end
+
+        if arr.get_size == nil or arr.get_element == nil then
+            return out
+        end
+
+        local size = arr:get_size()
+
+        if size > 0 then
+            local e0 = arr:get_element(0)
+            if e0 then
+                out.player = e0:get_field("mValue") or 0
+            end
+        end
+
+        if size > 1 then
+            local e1 = arr:get_element(1)
+            if e1 then
+                out.wirebug = e1:get_field("mValue") or 0
+            end
+        end
+
+        return out
+    end
+
+
+    return {
+        is_enable    = param:call("get_IsEnable"),
+        is_active    = param:call("get_IsActive"),
+
+        stock        = read_array("get_Stock"),        -- quanto já tomou
+        limit        = read_array("get_Limit"),        -- limite atual
+        add_limit    = read_array("get_AddLimit"),     -- aumento após proc
+        max_limit    = read_array("get_MaxLimit"),
+
+        active_time  = param:call("get_ActiveTime"),
+        active_timer = param:call("get_ActiveTimer"),
+
+        type         = param:get_field("<Type>k__BackingField")
+    }
+end
+
+
+
+local enabled = true
+math.randomseed(os.time()) -- Garante aleatoriedade
+
+-- Mapa de tipos de condição/flagelo conhecidos
+local condition_types = {
+    [0]  = "Paralisia",
+    [1]  = "Sono",
+    [2]  = "Sem elemento",
+    [4]  = "Veneno",
+    [5]  = "Explosão",
+    [7]  = "Montaria?",
+    [8]  = "Água",
+    [9]  = "Fogo",
+    [10] = "Gelo",
+    [11] = "Trovão",
+    [14] = "Tranquilizante"
+}
+
+function InstallStockDamageModifier(config)
+    config = config or {}
+    config.enabled = (config.enabled ~= false)
+    config.pending = nil
+
+    local enemy_character_base_type_def =
+        sdk.find_type_definition("snow.enemy.EnemyCharacterBase")
+    local stock_damage_method =
+        enemy_character_base_type_def:get_method("stockDamage")
+
+    sdk.hook(
+        stock_damage_method,
+        function(args)
+            if not config.enabled then return end
+            if not config.pending then return end
+
+            local damage = sdk.to_managed_object(args[3])
+            if not damage then return end
+
+
+            local ok, err = pcall(function()
+                damage:call("set_IsConditionDamage", true)
+                damage:call("set_IsStatusDamage", true)
+
+                if config.pending.cond_type then
+                    damage:call("set_ConditionDamageType", config.pending.cond_type)
+                end
+                if config.pending.cond_value then
+                    damage:call("set_ConditionDamage", config.pending.cond_value)
+                end
+
+                if config.pending.cond_type2 then
+                    damage:call(
+                        "set_ConditionDamageType2(snow.enemy.EnemyDef.ConditionDamageType)",
+                        config.pending.cond_type2
+                    )
+                end
+                if config.pending.cond_value2 then
+                    damage:call("set_ConditionDamage2", config.pending.cond_value2)
+                end
+
+                if config.pending.cond_type3 then
+                    damage:call("set_ConditionDamageType3", config.pending.cond_type3)
+                end
+                if config.pending.cond_value3 then
+                    damage:call("set_ConditionDamage3", config.pending.cond_value3)
+                end
+
+                if config.pending.element_type then
+                    damage:call("set_ElementType", config.pending.element_type)
+                end
+                if config.pending.element_value then
+                    damage:call("set_ElementDamage", config.pending.element_value)
+                end
+
+                if config.pending.stamina_value then
+                    damage:call("set_StaminaDamage", config.pending.stamina_value)
+                end
+                if config.pending.stun_value then
+                    damage:call("set_StunDamage", config.pending.stun_value)
+                end
+            end)
+
+            
+
+            config.pending = nil
+        end
+    )
+
+ 
+    local function start_expire_timer()
+        local start_time = os.clock()
+        local frame_handle
+
+        frame_handle = re.on_frame(function()
+            if os.clock() - start_time >= 1.0 then
+                config.enabled = false
+                config.pending = nil
+
+
+                if frame_handle then
+                    re.remove_event_listener(frame_handle)
+                    frame_handle = nil
+                end
+            end
+        end)
+    end
+
+   
+    return function(params)
+        config.enabled = true
+        config.pending = params
+        start_expire_timer()
+    end
+end
+
+local sdk = sdk   
+
+local function create_single_array(values)
+    local Single = sdk.find_type_definition("System.Single")
+    if not Single then
+        return nil
+    end
+    
+    local arr = sdk.create_managed_array(Single, #values)
+    if not arr then
+        return nil
+    end
+
+    for i = 1, #values do
+        arr[i-1] = values[i]
+    end
+
+    return arr
+end
+
+
+local patch_ativo = false
+local patch_fim = 0
+local patch_target = nil
+local patch_values = {}
+
+function start_condition_patch(damageParam, seconds, values)
+    patch_ativo = true
+    patch_fim = os.clock() + seconds
+    patch_target = damageParam
+    patch_values = values
+
+end
+
+
+re.on_frame(function(dt)
+    if not patch_ativo then return end
+
+    if os.clock() >= patch_fim then
+        patch_ativo = false
+        return
+    end
+
+    if not patch_target then return end
+
+    local list = patch_target:get_field("<DamageStock>k__BackingField")
+    if not list then return end
+
+    local count = list:call("get_Count")
+    for i = 0, count - 1 do
+        local stock = list:call("get_Item", i)
+        if stock then
+
+            local arr = stock:get_field("<ConditionDamage>k__BackingField")
+            if arr then
+                local len = arr:call("get_Length")
+
+                for j = 0, len - 1 do
+                    if patch_values[j+1] ~= nil then
+                        arr[j] = patch_values[j+1]
+                    end
+                end
+
+                stock:call("set_ConditionDamage", arr)
+            end
+        end
+    end
+end)
+
+
+
+
+local colorCreator = sdk.create_instance("via.Color", true)
+colorCreator:call(".cctor()")
+local color_map = {
+    Red      = colorCreator.Red,
+    DeepPink = colorCreator.DeepPink,
+    LightRed = colorCreator.LightRed,
+    DarkRed  = colorCreator.DarkRed,
+    Crimson  = colorCreator.Crimson,
+    Blue     = colorCreator.Blue,
+    LightBlue= colorCreator.LightBlue,
+    DarkBlue = colorCreator.DarkBlue,
+    SkyBlue  = colorCreator.SkyBlue,
+    RoyalBlue= colorCreator.RoyalBlue,
+    MidnightBlue = colorCreator.MidnightBlue,
+    Navy     = colorCreator.Navy,
+    Magenta  = colorCreator.Magenta,
+    Indigo   = colorCreator.Indigo,
+    Cyan     = colorCreator.Cyan,
+    White    = colorCreator.White,
+    Green    = colorCreator.Green,
+    LightGreen= colorCreator.LightGreen,
+    Pink     = colorCreator.Pink,
+    SeaGreen = colorCreator.SeaGreen,
+    DarkCyan = colorCreator.DarkCyan,
+    Brown    = colorCreator.Brown,
+    ForestGreen = colorCreator.ForestGreen,
+    Black    = colorCreator.Black,
+    DkGray   = colorCreator.DkGray,
+    LtGray   = colorCreator.LtGray,
+    DarkGreen= colorCreator.DarkGreen,
+    Gray     = colorCreator.Gray,
+    Yellow   = colorCreator.Yellow,
+    Orange   = colorCreator.Orange,
+    DarkOrange= colorCreator.DarkOrange
+
+}
+
+
+
+local function spawn_and_paint_effect(effect_str, color_name, delay, speed)
+    local container_str, element_str = effect_str:match("(%d+)|(%d+)")
+    if not container_str or not element_str then
+        return nil
+    end
+
+    local container_id = tonumber(container_str)
+    local element_id   = tonumber(element_str)
+
+    local user = sdk.get_managed_singleton("snow.player.PlayerManager")
+    if not user then return nil end
+    local master_player = user:call("findMasterPlayer")
+    if not master_player then return nil end
+    local userObject = master_player:call("get_GameObject")
+    if not userObject then return nil end
+
+    local effectManager = userObject:call(
+        "getComponent(System.Type)",
+        sdk.typeof("via.effect.script.ObjectEffectManager")
+    )
+    if not effectManager then return nil end
+
+    -- cria EffectID
+    local effectID = sdk.create_instance("via.effect.script.EffectID", true):add_ref()
+    effectID.ContainerID = container_id
+    effectID.ElementID   = element_id
+
+    -- overload mais seguro
+    local requestEffect = sdk.find_type_definition("via.effect.script.ObjectEffectManager")
+        :get_method("requestEffect(via.effect.script.EffectID, via.GameObject, System.Int32, via.effect.script.EffectManager.WwiseTriggerInfo)")
+
+    local created = nil
+    if requestEffect then
+        created = requestEffect:call(effectManager, effectID, userObject, 0, nil)
+    end
+
+    if created then
+        local color = color_map[color_name]
+        if color and schedule_effect then
+            schedule_effect(created, color, speed or 1.0, delay or 0.0)
+        end
+        return created
+    else
+        return nil
+    end
+end
+
+
+
+
+
+
+local last_blast_count = {}
+
+function BlastAtivado(enemy)
+    if not enemy then return false end
+
+    local damage_param = enemy:call("get_DamageParam")
+    if not damage_param then return false end
+
+    local blast_param = damage_param:get_field("_BlastParam")
+    if not blast_param then return false end
+
+    local activate_count_arr = blast_param:call("get_ActivateCount")
+    if not activate_count_arr then return false end
+
+    local ok, val = pcall(function() return activate_count_arr:call("GetValue(System.Int32)", 0) end)
+    if not ok or not val then return false end
+
+    local field = val:get_type_definition():get_field("mValue")
+    if not field then return false end
+
+    local count = field:get_data(val)
+    if not count then return false end
+
+    local key = tostring(enemy:get_field("<UniqueId>k__BackingField") or tostring(enemy))
+    local last = last_blast_count[key] or 0
+
+    if count > last then
+        last_blast_count[key] = count
+        return true
+    end
+
+    local damage_param = enemy:call("get_DamageParam")
+                
+    local blast_param = damage_param:get_field("_BlastParam")
+    local rate = blast_param:call("get_BlastDamageAdjustRateByEnemyLv")
+
+    bldmg = blast_param:call("get_BlastDamage")
+
+    blast_param:call("set_BlastDamage(System.Single)",(bldmg + 50.00))
+
+    last_blast_count[key] = count
+    return false
+end
+
+
+local function modify_effect(container, color, speed)
+    if not container or not sdk.is_managed_object(container) then
+        return
+    end
+    if not color then
+        return
+    end
+
+    local tdef = container:get_type_definition()
+    if not tdef then
+        return
+    end
+
+
+    if not _G.__hook_set_position_installed then
+        _G.__hook_set_position_installed = true
+
+        local pos_info_tdef =
+            sdk.find_type_definition("via.effect.script.EffectPositionHolder.PositionInfo")
+
+        if pos_info_tdef then
+            local set_pos_method =
+                pos_info_tdef:get_method("set_position(via.vec3)")
+
+            if set_pos_method then
+                sdk.hook(
+                    set_pos_method,
+                    function(args)
+                        
+
+                        local self = sdk.to_managed_object(args[2])
+                        local pos  = args[3]
+
+                        if not self or not pos then
+                            return
+                        end
+
+                        local ok, vec = pcall(sdk.to_valuetype, pos)
+                        if not ok or not vec then
+                            return
+                        end
+
+                        local vec_tdef = vec:get_type_definition()
+                        if not vec_tdef then
+                            return
+                        end
+                        if vec_tdef:get_full_name() ~= "via.vec3" then
+                            return
+                        end
+
+                        local okx, x = pcall(vec.get_field, vec, "x")
+                        local oky, y = pcall(vec.get_field, vec, "y")
+                        local okz, z = pcall(vec.get_field, vec, "z")
+
+                        if not (okx and oky and okz) then
+                            return
+                        end
+
+                       
+                    end,
+                    function(retval)
+                        return retval
+                    end
+                )
+
+            end
+        end
+    end
+
+
+    local set_root_color = tdef:get_method("setRootColor(via.Color)")
+    if set_root_color then
+        pcall(function()
+            container:call("setRootColor(via.Color)", color)
+        end)
+    end
+
+
+    if speed then
+        local set_speed = tdef:get_method("setPlaySpeed(System.Single)")
+        if set_speed then
+            pcall(function()
+                container:call("setPlaySpeed(System.Single)", speed)
+            end)
+        else
+            pcall(function()
+                container:set_field("_speed", speed)
+            end)
+        end
+    end
+end
+
+
+
+local function dump_color(label, c)
+    if not c then
+        return
+    end
+
+    local function safe_get(method)
+        local ok, val = pcall(function() return c:call(method) end)
+        if ok and val ~= nil then
+            return tostring(val)
+        else
+            return "ERR"
+        end
+    end
+
+    local ttype = "ERR"
+    local ok_t, tdef = pcall(function() return sdk.typeof(c) end)
+    if ok_t and tdef then
+        ttype = tostring(tdef)
+    end
+
+
+end
+
+local function multiply_colors(colorA, colorB)
+
+    if not colorA or not colorB then
+        return nil
+    end
+
+    dump_color("colorA", colorA)
+    dump_color("colorB", colorB)
+
+    local tdef = sdk.find_type_definition("via.Color")
+    local op_mul = tdef:get_method("op_Multiply(via.Color, via.Color)")
+
+    local ok, newColor = pcall(function()
+        return op_mul:call(nil, colorA, colorB)
+    end)
+
+    if not ok or not newColor then
+        return nil
+    end
+
+    dump_color("Resultado", newColor)
+    return newColor
+end
+
+local function add_colors(colorA, colorB)
+
+    if not colorA or not colorB then
+        return nil
+    end
+
+    dump_color("colorA", colorA)
+    dump_color("colorB", colorB)
+
+    local tdef = sdk.find_type_definition("via.Color")
+    local op_add = tdef:get_method("op_Addition(via.Color, via.Color)")
+
+    local ok, newColor = pcall(function()
+        return op_add:call(nil, colorA, colorB)
+    end)
+
+    if not ok or not newColor then
+        return nil
+    end
+
+    dump_color("Resultado", newColor)
+    return newColor
+end
+
+
+local LThunder = add_colors(color_map.Orange,color_map.DarkOrange)
+if LThunder then
+    color_map.LThunder = LThunder  
+
+end
+
+local LFire = multiply_colors(color_map.DarkGreen, color_map.Brown)
+if LFire then
+    color_map.LFire = LFire  
+
+end
+
+
+local LFire2 = multiply_colors(color_map.LFire, color_map.DarkGreen)
+if LFire2 then
+    color_map.LFire2 = LFire2  
+
+end
+
+
+local LFire3 = add_colors(color_map.LFire2, color_map.Blue)
+if LFire3 then
+    color_map.LFire3 = LFire3  
+
+end
+
+
+local LPink = multiply_colors(color_map.DarkRed, color_map.DarkRed)
+if LPink then
+    color_map.LPink = LPink  
+
+end
+
+local LPink3 = multiply_colors(color_map.LPink, color_map.LPink)
+if LPink3 then
+    color_map.LPink3 = LPink3  
+
+end
+
+
+
+local LFogoParte1 = add_colors(color_map.LFire, color_map.LFire3)
+if LFogoParte1 then
+    color_map.LFogoParte1 = LFogoParte1
+end
+
+
+local LFogoParte2 = add_colors(color_map.LFire, color_map.Blue)
+if LFogoParte2 then
+    color_map.LFogoParte2 = LFogoParte2
+end
+
+local LPink2 = add_colors(color_map.LPink3, color_map.LFogoParte1)
+if LPink2 then
+    color_map.LPink2 = LPink2  
+
+end
+
+local LThunder2 = add_colors(color_map.DarkOrange, color_map.Red)
+if LThunder2 then
+    color_map.LThunder2 = LThunder2  
+
+end
+
+local LThunder3 = add_colors(color_map.LThunder2, color_map.Green)
+if LThunder3 then
+    color_map.LThunder3 = LThunder3  
+
+end
+
+
+local PreRoxoClaro = multiply_colors(color_map.Green, color_map.SeaGreen)
+if PreRoxoClaro then
+    color_map.PreRoxoClaro = PreRoxoClaro  
+
+end
+
+local PreRoxoClaro2 = add_colors(color_map.PreRoxoClaro, color_map.DarkGreen)
+if PreRoxoClaro2 then
+    color_map.PreRoxoClaro2 = PreRoxoClaro2  
+
+end
+
+
+
+local RoxoClaro = add_colors(color_map.Magenta, color_map.PreRoxoClaro2)
+if RoxoClaro then
+    color_map.RoxoClaro = RoxoClaro  
+end
+
+local Vescuro = multiply_colors(color_map.Crimson, color_map.Crimson)
+if Vescuro then
+    color_map.Vescuro = Vescuro
+
+
+end  
+
+local Vescuro2 = multiply_colors(color_map.Vescuro, color_map.Vescuro)
+if Vescuro2 then
+    color_map.Vescuro2 = Vescuro2
+
+
+end 
+
+local Vescuro3 = multiply_colors(color_map.Vescuro2, color_map.Vescuro2)
+if Vescuro3 then
+    color_map.Vescuro3 = Vescuro3
+
+
+end 
+
+local Vescuro4 = add_colors(color_map.Vescuro3, color_map.DarkRed)
+if Vescuro4 then
+    color_map.Vescuro4 = Vescuro4
+
+
+end 
+
+
+local tentativaMarelo = add_colors(color_map.LFire, color_map.Vescuro2)
+if tentativaMarelo then
+    color_map.tentativaMarelo = tentativaMarelo
+
+
+end   
+
+local AstGreen1 = multiply_colors(color_map.DarkBlue, color_map.Vescuro)
+if AstGreen1 then
+    color_map.AstGreen1 = AstGreen1
+
+
+end 
+
+
+local AstGreen = add_colors(color_map.AstGreen1, color_map.DarkGreen)
+if AstGreen then
+    color_map.AstGreen = AstGreen
+
+
+end
+local Lavanda1 = add_colors(color_map.AstGreen1, color_map.Vescuro)
+if Lavanda1 then
+    color_map.Lavanda1 = Lavanda1
+
+
+end
+
+local Lavanda2 = add_colors(color_map.Lavanda1, color_map.tentativaMarelo)
+if Lavanda2 then
+    color_map.Lavanda2 = Lavanda2
+
+
+end
+
+local Lavanda3 = add_colors(color_map.DkGray, color_map.Lavanda2)
+if Lavanda3 then
+    color_map.Lavanda3 = Lavanda3
+
+
+end
+
+local Lavanda = add_colors(color_map.DarkBlue, color_map.Lavanda3)
+if Lavanda then
+    color_map.Lavanda = Lavanda
+
+
+end
+
+local WFire2 = multiply_colors(color_map.Vescuro3, color_map.LPink3)
+if WFire2 then
+    color_map.WFire2 = WFire2
+
+
+end
+local WFire3 = add_colors(color_map.Blue, color_map.LFire)
+if WFire3 then
+    color_map.WFire3 = WFire3
+
+
+end
+
+local WFire4 = add_colors(color_map.LPink3, color_map.WFire3)
+if WFire4 then
+    color_map.WFire4 = WFire4
+
+
+end
+
+local WFire5 = multiply_colors(color_map.WFire4, color_map.LPink3)
+if WFire5 then
+    color_map.WFire5 = WFire5
+
+
+end
+
+local DkGreen = multiply_colors(color_map.Lavanda3, color_map.WFire3)
+if DkGreen then
+    color_map.DkGreen = DkGreen
+end    
+
+local DkRed = multiply_colors(color_map.WFire2, color_map.LightGreen)
+if DkRed then
+    color_map.DkRed = DkRed
+end    
+
+
+local WFire6 = add_colors(color_map.DkGreen, color_map.DkGreen)
+if WFire6 then
+    color_map.WFire6 = WFire6
+
+
+end
+
+
+local WFire7 = add_colors(color_map.Blue, color_map.DkGreen)
+if WFire7 then
+    color_map.WFire7 = WFire7
+
+
+end
+
+local WFire = add_colors(color_map.DkRed, color_map.WFire7)
+if WFire then
+    color_map.WFire = WFire
+
+
+end
+
+local DkGreen2 = multiply_colors(color_map.DarkGreen, color_map.LFire3)
+if DkGreen2 then
+    color_map.DkGreen2 = DkGreen2
+end  
+
+local WFireB = add_colors(color_map.Indigo, color_map.Blue)
+if WFireB then
+    color_map.WFireB = WFireB
+
+
+end
+
+
+local ThYellow2 = multiply_colors(color_map.Orange, color_map.DarkOrange)
+if ThYellow2 then
+    color_map.ThYellow2 = ThYellow2
+
+
+end
+local ThYellow = add_colors(color_map.Red, color_map.ThYellow2)
+if ThYellow then
+    color_map.ThYellow = ThYellow
+
+
+end
+
+local Noxious = add_colors(color_map.LPink3, color_map.DkGray)
+if Noxious then
+    color_map.Noxious = Noxious
+
+
+end
+local pending_deactivates = {}
+
+function schedule_deactivate(enemy, param, delay)
+    pending_deactivates[enemy] = {
+        param = param,
+        time  = os.clock() + (delay or 0.5)
+    }
+end
+
+re.on_frame(function()
+    for enemy, data in pairs(pending_deactivates) do
+        if os.clock() >= data.time then
+            local pa_param = data.param
+            if pa_param then
+                pcall(function()
+                    pa_param:call("deactivate")
+                end)
+            end
+            pending_deactivates[enemy] = nil
+        end
+    end
+end)
+
+local scheduled_effects = {}
+
+local function get_time() return os.clock() end
+
+local function schedule_effect(container, color, speed,delay)
+    table.insert(scheduled_effects, {container = container, color = color,speed = speed, apply_time = get_time() + delay})
+end
+
+local function process_scheduled_effects()
+    local now = get_time()
+    for i = #scheduled_effects, 1, -1 do
+        local effect = scheduled_effects[i]
+        if now >= effect.apply_time then
+            modify_effect(effect.container, effect.color,effect.speed)
+            table.remove(scheduled_effects, i)
+        end
+    end
+end
+
+local last_container = nil
+local created_effect_container_type = sdk.find_type_definition("via.effect.script.CreatedEffectContainer")
+local getAllPlayers_method = created_effect_container_type:get_method("getAllPlayers")
+
+sdk.hook(getAllPlayers_method,
+    function(args)
+        local container = sdk.to_managed_object(args[2])
+        if not container then return end
+
+        last_container = container
+
+    
+    end,
+    function(retval)
+        return retval
+    end
+)
+
+
+
+function SpawnEffectOnPlayer_Visual(
+    containerID,
+    elementID,
+    color_name,
+    delay,
+    speed,
+    disable_effect,
+    duration
+)
+    -- PlayerManager
+    local pm = sdk.get_managed_singleton("snow.player.PlayerManager")
+    if not pm then
+        return nil
+    end
+
+    local player = pm:findMasterPlayer()
+    if not player then
+        return nil
+    end
+
+    -- GameObject do player
+    local playerObj = player:get_GameObject()
+    if not playerObj then
+        return nil
+    end
+
+    -- Cria EffectID
+    local effectID = sdk.create_instance("via.effect.script.EffectID", true):add_ref()
+    effectID.ContainerID = containerID
+    effectID.ElementID   = elementID
+
+    -- ObjectEffectManager do player
+    local effectManager = playerObj:call(
+        "getComponent(System.Type)",
+        sdk.typeof("via.effect.script.ObjectEffectManager")
+    )
+    if not effectManager then
+        return nil
+    end
+
+    -- requestEffectInternal (segue o player)
+    local req = sdk.find_type_definition("via.effect.script.ObjectEffectManager")
+        :get_method("requestEffectInternal(via.effect.script.EffectID, via.GameObject, System.Int32, via.effect.script.EffectManager.WwiseTriggerInfo, via.effect.script.EffectManager.RequestOverwriteParam)")
+
+    if not req then
+        return nil
+    end
+
+    local created = req(effectManager, effectID, nil, nil, nil, nil)
+    if not created then
+        return nil
+    end
+
+   
+
+    -- Desativa imediatamente (se pedido)
+    if disable_effect then
+        if created.finishAll then created:finishAll() end
+        if created.finishAllInternal then created:finishAllInternal() end
+        return nil
+    end
+
+
+    if duration and duration > 0 then
+        local start_time = os.clock()
+        local expired = false
+        local frame_handle
+
+        frame_handle = re.on_frame(function()
+            if expired or not created or not sdk.is_managed_object(created) then
+                if frame_handle then
+                    re.remove_event_listener(frame_handle)
+                    frame_handle = nil
+                end
+                return
+            end
+
+            if os.clock() - start_time >= duration then
+                expired = true
+                pcall(function()
+                    if created.finishAll then created:finishAll() end
+                    if created.finishAllInternal then created:finishAllInternal() end
+                end)
+
+                if frame_handle then
+                    re.remove_event_listener(frame_handle)
+                    frame_handle = nil
+                end
+            end
+        end)
+    end
+
+
+    if color_name and schedule_effect then
+        local color = color_map[color_name]
+        if color then
+            schedule_effect(
+                created,
+                color,
+                speed or 1.0,
+                delay or 0.0
+            )
+        end
+    end
+
+    return created
+end
+
+function SpawnConditionVisual(enemy, cond_type, color_name, delay, speed, disable_effect, duration)
+    if not enemy then
+        return nil
+    end
+
+    local id = enemy:call("getConditionDamageEffectId(snow.enemy.EnemyDef.ConditionDamageEffectType)", cond_type)
+    if not id then
+        return nil
+    end
+
+    local contid = id:call("get_containerID")
+    local elementid = id:call("get_elementID")
+  
+
+    -- Cria EffectID
+    local effectID = sdk.create_instance("via.effect.script.EffectID", true):add_ref()
+    effectID.ContainerID = contid
+    effectID.ElementID   = elementid
+
+    -- GameObject do inimigo
+    local enemyObj = enemy:call("get_GameObject")
+    if not enemyObj then
+        return nil
+    end
+
+    local effectManager = enemyObj:call(
+        "getComponent(System.Type)",
+        sdk.typeof("via.effect.script.ObjectEffectManager")
+    )
+    if not effectManager then
+        return nil
+    end
+
+    -- Método de requestEffect
+    local req = sdk.find_type_definition("via.effect.script.ObjectEffectManager")
+        :get_method("requestEffect(via.effect.script.EffectID, via.GameObject, System.Int32, via.effect.script.EffectManager.WwiseTriggerInfo)")
+
+    local created = req:call(effectManager, effectID, enemyObj, 0, nil)
+    if not created then
+        return nil
+    end
+
+
+    -- Se disable_effect for true → desativa imediatamente
+    if disable_effect then
+        if created.finishAll then created:finishAll() end
+        if created.finishAllInternal then created:finishAllInternal() end
+        return nil
+    end
+
+
+    if duration and duration > 0 then
+        local start_time = os.clock()
+        local expired = false
+        local frame_handle
+
+        frame_handle = re.on_frame(function()
+            -- Se já expirou ou foi coletado, remove
+            if expired or not created or not sdk.is_managed_object(created) then
+                if frame_handle then
+                    re.remove_event_listener(frame_handle)
+                    frame_handle = nil
+                end
+                return
+            end
+
+            local elapsed = os.clock() - start_time
+            if elapsed >= duration then
+                expired = true
+
+                -- Protege contra métodos inexistentes
+                if created and sdk.is_managed_object(created) then
+                    pcall(function()
+                        if created.finishAll then created:finishAll() end
+                        if created.finishAllInternal then created:finishAllInternal() end
+                    end)
+
+
+                end
+
+                -- Remove o callback deste loop
+                if frame_handle then
+                    re.remove_event_listener(frame_handle)
+                    frame_handle = nil
+                end
+            end
+        end)
+    end
+
+    if color_name and schedule_effect then
+        local color = color_map[color_name]
+        if color then
+            schedule_effect(created, color, speed or 1.0, delay or 0.0)
+        end
+    end
+
+    return created
+end
+
+
+
+function inspectObject(obj, tag)
+    if not obj then
+        return
+    end
+
+    local tdef = obj:get_type_definition()
+    if not tdef then
+        return
+    end
+
+
+
+   
+    for _, m in ipairs(tdef:get_methods()) do
+        local name = m:get_name()
+        if name:find("^get_") then
+            local ok, value = pcall(function()
+                return obj:call(name)
+            end)
+        end
+    end
+
+
+    for _, f in ipairs(tdef:get_fields()) do
+        local fname = f:get_name()
+        local ok, value = pcall(function()
+            return f:get_data(obj)
+        end)
+    end
+
+
+    local important = "<DamageRate>k__BackingField"
+
+    local field = tdef:get_field(important)
+    if field then
+        local ok, val = pcall(function()
+            return field:get_data(obj)
+        end)
+    else
+    end
+
+end
+
+local enemy_character_base_type_def = sdk.find_type_definition("snow.enemy.EnemyCharacterBase")
+local after_calc_method = enemy_character_base_type_def:get_method("afterCalcDamage_DamageSide")
+
+local enemy_calc_damage_info_type_def = sdk.find_type_definition("snow.hit.EnemyCalcDamageInfo.AfterCalcInfo_DamageSide")
+local hitpos = enemy_calc_damage_info_type_def:get_method("get_HitPos")
+local crit = enemy_calc_damage_info_type_def:get_method("get_CriticalResult")
+local weapon = enemy_calc_damage_info_type_def:get_method("get_WeaponType")
+local elementType = enemy_calc_damage_info_type_def:get_method("get_ElementType")
+local elementDmg1 = enemy_calc_damage_info_type_def:get_method("get_ElementPartsVitalDamage")
+local elementDmg2 = enemy_calc_damage_info_type_def:get_method("get_ElementPartsLossVitalDamage")
+local elementDmg3 = enemy_calc_damage_info_type_def:get_method("get_ElementMultiPartsVitalDamage")
+
+local get_damage_attacker_type = enemy_calc_damage_info_type_def:get_method("get_DamageAttackerType")
+local get_condition_damage = enemy_calc_damage_info_type_def:get_method("get_ConditionDamage")
+--local get_contidion_damage2 = enemy_calc_damage_info_type_def:get_method("get_ConditionDamage2")
+local setC = enemy_calc_damage_info_type_def:get_method("set_ConditionDamage")
+local setTyp2 = enemy_calc_damage_info_type_def:get_method("set_ConditionDamageType2")
+local setC2 = enemy_calc_damage_info_type_def:get_method("set_ConditionDamage2")
+local setCri = enemy_calc_damage_info_type_def:get_method("set_CriticalResult(snow.hit.CriticalType)")
+local get_condition_type = enemy_calc_damage_info_type_def:get_method("get_ConditionDamageType")
+
+--local get_condition_type2 = enemy_calc_damage_info_type_def:get_method("get_ConditionDamageType2")
+
+local set_condition_type = enemy_calc_damage_info_type_def:get_method("set_ConditionDamageType")
+
+local is_boss_enemy_method = enemy_character_base_type_def:get_method("get_isBossEnemy")
+local get_name_message_method = enemy_character_base_type_def:get_method("get_NameMessage")
+
+-- === EnemyDamageCalcParam hook ===
+local enemy_damage_calc_param_type_def =
+    sdk.find_type_definition("snow.enemy.EnemyDamageCalcParam")
+
+local set_condition_damage2_param =
+    enemy_damage_calc_param_type_def:get_method(
+        "set_ConditionDamage2(System.Single)"
+    )
+
+local set_stun_damage_param =
+    enemy_damage_calc_param_type_def:get_method(
+        "set_StunDamage(System.Single)"
+    )
+
+local recent_hits = {}
+local HIT_BUFFER_TIME = 2.0
+
+local function debug_container_info(container)
+    if not container then
+        return
+    end
+
+    local tdef = container:get_type_definition()
+    if not tdef then
+        return
+    end
+
+    -- tenta pegar os campos internos
+    local ok, contid = pcall(function() return container:get_field("_ContainerID") end)
+    local ok2, elemid = pcall(function() return container:get_field("_ElementID") end)
+
+end
+
+
+local function check_and_restore_sharpness()
+    local player_manager = sdk.get_managed_singleton("snow.player.PlayerManager")
+    if not player_manager then
+        return
+    end
+
+    local master_player = player_manager:call("findMasterPlayer")
+    if not master_player then
+        return
+    end
+
+    local player_base = master_player
+
+    local sharp_max = player_base:call("get_SharpnessGaugeMax")
+    local sharp_current = player_base:call("get_SharpnessGauge")
+    if not sharp_max or not sharp_current then
+        return
+    end
+
+ 
+        local restore_amount = math.floor(sharp_max * 0.05) -- 5%
+        local new_value = math.min(sharp_current + restore_amount, sharp_max)
+        spawn_and_paint_effect("0|999", "Yellow", 0.1, 0.5)
+
+        player_base:call("set_SharpnessGauge(System.Int32)", new_value)
+     
+end
+
+local function replicate_last_container(repeats, delay_step, speed)
+    if not last_container then
+        return
+    end
+
+    repeats = repeats or 5
+    delay_step = delay_step or 0.5
+    speed = speed or 1.0
+
+    local color_cycle = {
+        color_map.Brown,
+        color_map.Red,
+        color_map.Blue,
+        color_map.Green,
+        color_map.Pink,
+        color_map.Cyan,
+        color_map.White,
+        color_map.RoyalBlue,
+        color_map.SkyBlue
+    }
+
+    for i = 1, repeats do
+        local color = color_cycle[((i - 1) % #color_cycle) + 1]
+        local delay = i * delay_step
+        schedule_effect(last_container, color, speed, delay)
+    
+    end
+end
+
+local function dump_positions_from_container(container)
+    if not container then
+        return
+    end
+
+    local tdef = container:get_type_definition()
+    if not tdef then
+        return
+    end
+
+    local get_positions = tdef:get_method("get_effectPositions")
+    if not get_positions then
+        return
+    end
+
+    -- chama o método
+    local ok, enumerable = pcall(function() return get_positions:call(container) end)
+    if not ok or not enumerable then
+        return
+    end
+
+    local enumerator = enumerable:call("GetEnumerator")
+    if not enumerator then
+        return
+    end
+
+    local i = 0
+    while enumerator:call("MoveNext") do
+        local pos_info = enumerator:call("get_Current")
+        if pos_info then
+            local pos = pos_info:call("get_position")
+            local startPos = pos_info:call("get_startPosition")
+
+            local px, py, pz = 0, 0, 0
+            local sx, sy, sz = 0, 0, 0
+
+            if pos then
+                px, py, pz = pos.x, pos.y, pos.z
+            end
+            if startPos then
+                sx, sy, sz = startPos.x, startPos.y, startPos.z
+            end
+
+
+        else
+            return
+        end
+        i = i + 1
+    end
+
+    if i == 0 then
+        return
+    end
+end
+
+local function clean_old_hits()
+    local now = get_time()
+    for i = #recent_hits, 1, -1 do
+        if now - recent_hits[i].time > HIT_BUFFER_TIME then
+            table.remove(recent_hits, i)
+        end
+    end
+end
+
+local function get_monster_name(enemy)
+    if not enemy then return "Desconhecido" end
+    if not get_name_message_method then return "Desconhecido" end
+    local name_msg = get_name_message_method:call(enemy)
+    if name_msg then return name_msg:call("ToString") or "Desconhecido" end
+    return "Desconhecido"
+end
+
+_G.onVenomHitDetected = function(category, damage, time, monster_name, monster_size, enemy_obj)
+    
+end
+
+
+local EFFECT_ACTIVE_DURATION = dragaoTime[enemy] or 25.0
+local effect_last_activation = 0
+local hit_hook_installed = false
+
+-- tabela: HitID → dados originais
+local original_hit_data = {}
+
+function ActivateZeroDamageEffect()
+    effect_last_activation = os.clock()
+end
+
+function IsEffectActive()
+    return (os.clock() - effect_last_activation) <= EFFECT_ACTIVE_DURATION
+end
+
+
+
+function RestoreOriginalDamage(this, hit_id)
+    local backup = original_hit_data[hit_id]
+    if not backup then return end
+
+    -- campos restaurados
+    if backup.Damage then this:set_field("<Damage>k__BackingField", backup.Damage) end
+    if backup.BaseDamage then this:set_field("_BaseDamage", backup.BaseDamage) end
+    if backup.Power then this:set_field("_Power", backup.Power) end
+    if backup.Element then this:set_field("_BaseAttackElementValue", backup.Element) end
+    if backup.Debuff then this:set_field("_BaseDebuffValue", backup.Debuff) end
+
+end
+
+
+
+function InstallBaseHitHook()
+    if hit_hook_installed then return end
+    hit_hook_installed = true
+
+    local Type = sdk.find_type_definition("snow.hit.userdata.BaseHitAttackRSData")
+    if not Type then
+        return
+    end
+
+    local method_init = Type:get_method("init")
+    if not method_init then
+        return
+    end
+    local debuffType = Type:get_field("<DamageTypeValue>k__BackingField")
+    local f_Damage = Type:get_field("<Damage>k__BackingField")
+    local f_BaseDamage = Type:get_field("_BaseDamage")
+    local f_Power = Type:get_field("_Power")
+    local f_Element = Type:get_field("_BaseAttackElementValue")
+    local f_Debuff = Type:get_field("_BaseDebuffValue")
+    local f_HitID = Type:get_field("<HitID>k__BackingField")
+
+
+    sdk.hook(
+        method_init,
+
+       
+        function(args)
+            local this = sdk.to_managed_object(args[2])
+            if this == nil then return args end
+
+            local hit_id = nil
+            if f_HitID then hit_id = this:get_field("<HitID>k__BackingField") end
+            if not hit_id then return args end
+
+        
+            if not original_hit_data[hit_id] then
+                original_hit_data[hit_id] = {
+                    Type    = DamageType and this:get_field("<DamageTypeValue>k__BackingField") or nil,
+                    Damage  = f_Damage and this:get_field("<Damage>k__BackingField") or nil,
+                    BaseDamage = f_BaseDamage and this:get_field("_BaseDamage") or nil,
+                    Power   = f_Power and this:get_field("_Power") or nil,
+                    Element = f_Element and this:get_field("_BaseAttackElementValue") or nil,
+                    Debuff  = f_Debuff and this:get_field("_BaseDebuffValue") or nil,
+                }
+            end
+
+
+            if not IsEffectActive() then
+                RestoreOriginalDamage(this, hit_id)
+                return args
+            end
+
+   
+            local backup = original_hit_data[hit_id]
+            if backup then
+                if f_Damage and backup.Damage then
+                    this:set_field("<Damage>k__BackingField", backup.Damage * 0.8)
+                end
+
+                if f_BaseDamage and backup.BaseDamage then
+                    this:set_field("_BaseDamage", backup.BaseDamage * 0.8)
+                end
+
+                if f_Power and backup.Power then
+                    this:set_field("_Power", backup.Power * 0.8)
+                end
+
+                if f_Element and backup.Element then
+                    this:set_field("_BaseAttackElementValue", backup.Element * 0.0)
+                end
+
+                if f_Debuff and backup.Debuff then
+                    this:set_field("_BaseDebuffValue", backup.Debuff * 0.0)
+                end
+            end
+
+
+            return args
+        end,
+
+
+        function(retval)
+            return retval
+        end
+    )
+end
+
+
+
+function hookEnemySetupAttack(enemy)
+    ActivateZeroDamageEffect()
+end
+
+
+_G.__paralyze_active = false
+
+local ParalyzeParam = sdk.find_type_definition("snow.enemy.EnemyAbnormalStatusController.ParalyzeParam")
+if ParalyzeParam then
+    local onActivate = ParalyzeParam:get_method("onActivateProc()")
+    local onEnd = ParalyzeParam:get_method("onEndProc()")
+
+    sdk.hook(onActivate, function(args)
+        _G.__paralyze_active = true
+    end)
+
+    sdk.hook(onEnd, function(args)
+        _G.__paralyze_active = false
+    end)
+end
+
+
+
+last_created_container = nil
+
+sdk.hook(
+    sdk.find_type_definition("snow.SnowEffectManager")
+        :get_method("eventAfterCreateEffect(via.effect.script.EffectManager.AfterCreateEffectInfo)"),
+
+    function(args)
+        local eff = sdk.to_managed_object(args[3])
+        if not eff then return end
+
+        local cont = eff:get_Container()
+        if cont then
+            last_created_container = cont
+        end
+    end,
+
+    function(retval) return retval end
+)
+
+
+local function modify_effect(container, color, speed)
+    if not container then return end
+    if not color then return end
+
+    local tdef = container:get_type_definition()
+    if not tdef then return end
+
+    -- método real do MHRise
+    local set_root_color = tdef:get_method("setRootColor(via.Color)")
+    if set_root_color then
+        pcall(function()
+            container:call("setRootColor(via.Color)", color)
+        end)
+    end
+
+    if speed then
+        pcall(function()
+            if container.setPlaySpeed then
+                container:setPlaySpeed(speed)
+            end
+        end)
+    end
+end
+
+
+function SpawnEffectCustom(pos, containerID, elementID, speed, color_name, duration)
+    local playerMan = sdk.get_managed_singleton("snow.player.PlayerManager")
+    if not playerMan then return end
+
+    local user = playerMan:call("findMasterPlayer")
+    if not user then return end
+
+    local userGO = user:get_GameObject()
+    if not userGO then return end
+
+    local fxman = userGO:call(
+        "getComponent(System.Type)",
+        sdk.typeof("via.effect.script.ObjectEffectManager")
+    )
+    if not fxman then return end
+
+
+    local effectID = sdk.create_instance("via.effect.script.EffectID", true):add_ref()
+    effectID.ContainerID = containerID
+    effectID.ElementID   = elementID
+
+    local req = fxman:get_type_definition():get_method(
+        "requestEffect(via.effect.script.EffectID, via.vec3, via.Quaternion, via.GameObject, System.String, via.effect.script.EffectManager.WwiseTriggerInfo)"
+    )
+
+    local trigger = sdk.create_instance(
+        "via.effect.script.EffectManager.WwiseTriggerInfo", true
+    ):add_ref()
+
+    local rot = Quaternion.new(0, 0, 0, 1)
+
+  
+    req:call(fxman, effectID, pos, rot, nil, nil, trigger)
+
+
+    local container = last_created_container
+    if not container then
+        return nil
+    end
+
+
+    if color_name and color_name ~= "" then
+        local viaColor = sdk.create_instance("via.Color", true):add_ref()
+        viaColor:call(".cctor()")
+
+        local base = viaColor[color_name]
+        if base then
+            local newColor = viaColor:call(
+                "op_Multiply(via.Color, via.Color)",
+                base, base
+            )
+            container:setRootColor(newColor)
+        end
+    end
+
+    if speed and speed ~= 1 then
+        container:setPlaySpeed(speed)
+    end
+
+
+    if duration and duration > 0 then
+        local start_time = os.clock()
+        local fx = container
+        local frame_handle
+
+        frame_handle = re.on_frame(function()
+            if not fx or not sdk.is_managed_object(fx) then
+                if frame_handle then
+                    re.remove_event_listener(frame_handle)
+                    frame_handle = nil
+                end
+                return
+            end
+
+            if os.clock() - start_time >= duration then
+                pcall(function()
+                    fx:finishAll()
+                    fx:finishAllInternal()
+                end)
+
+                fx = nil
+
+                if frame_handle then
+                    re.remove_event_listener(frame_handle)
+                    frame_handle = nil
+                end
+            end
+        end)
+    end
+
+    return container
+end
+
+
+local _forcing_action = false
+
+local function get_field(obj, name)
+    local td = obj:get_type_definition()
+    local f = td:get_field(name)
+    if not f then
+        return nil
+    end
+    return f:get_data(obj)
+end
+addDragao = addDragao or {}
+dragaoTime = dragaoTime or {}
+
+function iniciaDragon(enemy)
+    if not enemy or not sdk.is_managed_object(enemy) then return end
+    if cond_dragao[enemy] == nil then  cond_dragao[enemy] = 0 end
+    local damage_param = enemy:call("get_DamageParam")
+    if not damage_param then return end
+    drageffect[enemy] = 0
+    local thunder_param = damage_param:get_field("_ThunderParam")
+    dragaoTime[enemy] = thunder_param:call("get_ActiveTime()")
+
+    if dragaoTime[enemy] == 0.0 or dragaoTime[enemy] == nil then thunder_param = damage_param:get_field("_ParalyzeParam") end
+    if not thunder_param then return end
+    dragaoTime[enemy] = thunder_param:call("get_ActiveTime()") + 5.0
+    if dragaoTime[enemy] == nil or dragaoTime[enemy] == 0.0 then dragaoTime[enemy] = nil end
+    if dragaoTime[enemy] == 40.0 then
+        addDragao[enemy] = 137
+    else
+        addDragao[enemy] = 130 
+    end
+    if not atvdragao[enemy] then
+        atvdragao[enemy] = false
+    end
+
+
+    if not dragao[enemy] then
+        dragao[enemy] = 180
+    end
+end
+function WaitEnemyHitData(enemy, on_found)
+    if not enemy or not sdk.is_managed_object(enemy) then
+        return false
+    end
+
+    if aguardando_hitdata[enemy] then
+        return false
+    end
+
+    local RSC = enemy:call("getEnemyRSCController()")
+    if not RSC then
+        return false
+    end
+    aguardando_hitdata[enemy] = {
+        RSC = RSC,
+        callback = on_found
+    }
+
+    return true
+end
+
+re.on_frame(function()
+    for enemy, data in pairs(aguardando_hitdata) do
+        if not enemy or not sdk.is_managed_object(enemy) then
+            aguardando_hitdata[enemy] = nil
+        else
+            local attacks = data.RSC:call("get_AttackWorks()")
+            if attacks and attacks.get_size then
+                for i = 0, attacks:get_size() - 1 do
+                    local attack = attacks:get_element(i)
+                    if attack then
+                        local hit_data = attack:call("get_HitData")
+                        if hit_data and sdk.is_managed_object(hit_data) then
+
+                            -- callback opcional
+                            if data.callback then
+                                pcall(data.callback, enemy, hit_data)
+                            end
+
+                            -- remove: não escaneia mais esse enemy
+                            aguardando_hitdata[enemy] = nil
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+
+function HookEnemyManagerAttackRateTimed(difficulty_id, attack_rate_value, enemy, duration_seconds)
+    local enabled = true
+    local start_time = os.clock()
+
+    baseAtk = baseAtk or {}
+
+    -- EnemyManager
+    local enemy_manager_td = sdk.find_type_definition("snow.enemy.EnemyManager")
+    if not enemy_manager_td then
+        return
+    end
+
+    local hook_method = enemy_manager_td:get_method("getBossEnemySameBlock(System.Int32)")
+    if not hook_method then
+    
+        return
+        
+    end
+    sdk.hook(
+        hook_method,
+        function(args)
+            if not enabled then
+                return args
+            end
+            if os.clock() - start_time >= duration_seconds then
+                enabled = false
+
+                atvdragao[enemy] = false
+                drageffect[enemy] = 0
+                return
+            end
+
+            local enemy_manager =
+                sdk.get_managed_singleton("snow.enemy.EnemyManager")
+            if not enemy_manager then return end
+
+            local rate_data = enemy_manager:call(
+                "getDifficultyAttackRateTableData(System.UInt16, System.Boolean)",
+                difficulty_id,
+                false
+            )
+
+            if not rate_data or not sdk.is_managed_object(rate_data) then
+                return
+            end
+            if enemy and baseAtk[enemy] == nil then
+                baseAtk[enemy] = rate_data:call("get_AttackRate")
+            end
+            local ataque = baseAtk[enemy]
+            if attack_rate_value == false then
+                rate_data:set_field("_AttackRate", ataque * 0.8 )
+            else
+                rate_data:set_field("_AttackRate", 0.0)
+            end
+        end,
+
+        function(retval)
+            return retval
+        end
+    )
+
+
+    re.on_frame(function()
+        if enabled then return end
+        if not enemy then return end
+        if not baseAtk[enemy] then return end
+
+        local enemy_manager =
+            sdk.get_managed_singleton("snow.enemy.EnemyManager")
+        if not enemy_manager then return end
+
+        local rate_data = enemy_manager:call(
+            "getDifficultyAttackRateTableData(System.UInt16, System.Boolean)",
+            difficulty_id,
+            false
+        )
+
+        if rate_data and sdk.is_managed_object(rate_data) then
+            rate_data:set_field("_AttackRate", baseAtk[enemy])
+            
+        end
+
+        baseAtk[enemy] = nil
+        enemy = nil
+    end)
+
+    
+end
+
+local function Hook_ShellBase_RequestDestroy_ByEmType(targetEmType, duration_sec)
+    if targetEmType == nil then
+        return
+    end
+
+    duration_sec = duration_sec or 0
+    local start_time = os.clock()
+    local active = true
+
+    local ShellBase = sdk.find_type_definition("snow.shell.ShellBase")
+    if not ShellBase then
+        return
+    end
+
+    local method = ShellBase:get_method("requestHitAttackWithHitID", 4)
+    if not method then
+        return
+    end
+
+    sdk.hook(
+        method,
+
+        function(args)
+            if not active then return end
+
+            if duration_sec > 0 and (os.clock() - start_time) >= duration_sec then
+                active = false
+                return
+            end
+
+            local shell = sdk.to_managed_object(args[2])
+            if not shell then return end
+
+            -- Shell ID
+            local ok_id, shellID = pcall(function()
+                return shell:call("get_ID")
+            end)
+            if not ok_id or shellID == nil then return end
+
+            -- OwnerObject
+            local ok_owner, owner = pcall(function()
+                return shell:call("get_OwnerObject")
+            end)
+            if not ok_owner or not owner then return end
+
+            -- EnemyType
+            local ok_et, ownerEmType = pcall(function()
+                return owner:call("get_EnemyType")
+            end)
+            if not ok_et then return end
+
+            -- Comparação direta
+            if ownerEmType == targetEmType then
+                pcall(function()
+                    shell:set_field("_RequestDestroy", true)
+                end)
+
+                
+            end
+        end,
+
+        function(retval)
+            return retval
+        end
+    )
+
+ 
+end
+
+local function StartCondDragaoDecay(enemy)
+    if not enemy or not sdk.is_managed_object(enemy) then return end
+
+    if cond_dragao_active[enemy] then
+        return
+    end
+
+    cond_dragao_active[enemy] = true
+    cond_dragao_last_time[enemy] = os.clock()
+
+
+    re.on_frame(function()
+        if not cond_dragao_active[enemy] then
+            return
+        end
+
+        -- enemy inválido
+        if not enemy or not sdk.is_managed_object(enemy) then
+            cond_dragao_active[enemy] = false
+            return
+        end
+
+        if not cond_dragao[enemy] or cond_dragao[enemy] <= 0 then
+            cond_dragao[enemy] = 0
+            cond_dragao_active[enemy] = false
+            return
+        end
+
+        local now = os.clock()
+        local elapsed = now - cond_dragao_last_time[enemy]
+
+        if elapsed >= 2.0 then
+            cond_dragao_last_time[enemy] = now
+
+            cond_dragao[enemy] = cond_dragao[enemy] - 1
+            if cond_dragao[enemy] < 0 then
+                cond_dragao[enemy] = 0
+            end
+
+           
+
+            if cond_dragao[enemy] <= 0 then
+                cond_dragao_active[enemy] = false
+            end
+        end
+    end)
+end
+
+
+
+
+function InitPlayerDataScanner(enemy,hit_pos,crithit,eledmg1,eledmg2,eledmg3,eleType,attacker_type,element)
+    local sdk = sdk
+    local log_prefix = "[PlayerDataScanner] "
+    if dragaoTime[enemy] == nil then iniciaDragon(enemy) end   
+    local enabled = true
+    local hp = enemy:call("getHpVital()")
+    if hp == 0 then return end
+            local chance = 0
+            if  eleType == 7 and atvdragao[enemy] == false then        -- explosão principal
+                if attacker_type == 0 then ganho = eledmg3 * 0.5 else ganho = eledmg3 end 
+                if cond_dragao_active[enemy] ~= true then StartCondDragaoDecay(enemy) end
+            else
+                ganho = 0
+            end
+
+            if element > 50 and attacker_type == 0 then
+                speed = 0.6
+                color = color_map.Vescuro3
+                if last_container then
+                        schedule_effect(last_container, color,speed, 0.1)
+                end
+                SpawnEffectCustom(hit_pos, 0, 800, 0.3, "Black", 1.5)
+                SpawnEffectCustom(hit_pos, 100, 1003, 0.3, "Black", 1.5)
+                SpawnEffectCustom(hit_pos, 100, 160, 0.3, "DarkRed", 0.6)
+                SpawnEffectCustom(hit_pos, 100, 1091, 0.2, "Black", 0.1)
+                SpawnEffectCustom(hit_pos, 100, 1004, 0.11, "DkGray", 4.5)
+                SpawnEffectCustom(hit_pos, 100, 355, 0.3, "Brown", 2.5)
+
+                for i = 0, 3 do
+
+                    SpawnEffectCustom(hit_pos, 100, 1004, 0.13, "DarkRed", 4.5)
+                end
+            elseif (element >= 35 and eledmg3 <=50) and attacker_type == 0 then
+                speed = 0.7
+                color = color_map.DarkRed
+                if last_container then
+                        schedule_effect(last_container, color,speed, 0.2)
+                end
+                --SpawnEffectCustom(hit_pos, 100, 354, 0.3, "DarkRed", 0.4)
+                --SpawnEffectCustom(hit_pos, 100, 364, 0.4, "DarkRed", 0.4)
+                --SpawnEffectCustom(hit_pos, 100, 370, 0.4, "DarkRed", 1.4)
+            SpawnEffectCustom(hit_pos, 100, 1004, 0.13, "LtGray", 2.5)
+
+                SpawnEffectCustom(hit_pos, 0, 800, 0.3, "Black", 1.5)
+                SpawnEffectCustom(hit_pos, 100, 1003, 0.3, "Black", 1.5)
+                SpawnEffectCustom(hit_pos, 100, 1003, 0.3, "Black", 1.5)
+                
+
+            else  SpawnEffectCustom(hit_pos, 100, 1004, 0.14, "White", 2.5) end
+
+            if dragaoTime[enemy] == nil then return end
+            if ganho > 0 then
+                cond_dragao[enemy] = cond_dragao[enemy] + ganho
+            end
+
+            
+
+            if crithit == 1 and drageffect[enemy] == 1 and element > 50 and attacker_type == 0 then
+                color = Red
+                speed = 0.4
+                
+                if last_container then
+                    schedule_effect(last_container, color,speed, 0.3)
+                end
+                SpawnEffectCustom(hit_pos, 200, 1020, nil, "Red", 3.0)
+                SpawnEffectCustom(hit_pos, 0, 1000, nil, "LightPink", 3.0)
+                SpawnEffectCustom(hit_pos, 100, 800, nil, "Red", 3.0)
+                CriarHookElemental()
+
+            end
+
+
+            if cond_dragao[enemy] >= dragao[enemy] and drageffect[enemy] == 0 then
+                cond_dragao_active[enemy] = false
+                cond_dragao[enemy] = cond_dragao[enemy] - dragao[enemy]  -- reseta o acumulador (mantém sobra)
+                local no =    enemy:call("getNandoTblNo(snow.enemy.EnemyDef.NandoKind)",1)
+                atvdragao[enemy] = true
+                local typeE = enemy:call("get_EnemyType()")
+                HookEnemyManagerAttackRateTimed(no, false,enemy,dragaoTime[enemy])
+                if addDragao[enemy] ~= nil then  dragao[enemy] = dragao[enemy] + addDragao[enemy] end
+
+                if element > 50 and attacker_type == 0 then
+                    if SpawnConditionVisual then
+                        SpawnConditionVisual(enemy, 0, "Vescuro3", 0.1, 0.5,false,dragaoTime[enemy])
+                        SpawnConditionVisual(enemy, 0, "LPink3", 0.1, 0.5,false,dragaoTime[enemy])
+                        SpawnConditionVisual(enemy, 6, "Crimson", 0.1, 0.5,false,dragaoTime[enemy])
+                        Hook_ShellBase_RequestDestroy_ByEmType(typeE, dragaoTime[enemy])
+
+
+                        drageffect[enemy] = 1
+
+                    end
+                elseif (element >=35 and element <= 50 ) and attacker_type == 0 then
+                    if SpawnConditionVisual then
+                        SpawnConditionVisual(enemy, 0, "Vescuro3", 0.1, 0.5,false,dragaoTime[enemy])
+                        Hook_ShellBase_RequestDestroy_ByEmType(typeE, dragaoTime[enemy])
+
+                    end
+                    
+                else
+                    SpawnConditionVisual(enemy, 0, "Crimson", 0.1, 0.5,false,dragaoTime[enemy])
+
+                end
+            end
+
+end
+
+local function extract_no_value(entry)
+    if type(entry) ~= "table" then
+        return nil
+    end
+
+    if type(entry.value) ~= "number" then
+        return nil
+    end
+
+    return entry.value
+end
+
+
+-- Delay seguro usando on_frame
+local function delay(seconds, callback)
+    if type(callback) ~= "function" then
+        return
+    end
+
+    local start = os.clock()
+
+    local function wrapped()
+        local ok, result = pcall(function()
+            if os.clock() - start >= seconds then
+                callback()
+                return false -- remove callback do on_frame
+            end
+        end)
+
+        if not ok then
+            return false -- remover mesmo assim
+        end
+
+        return result
+    end
+
+    re.on_frame(wrapped)
+end
+
+
+
+local function make_real_stock(dmg_type, raw_dmg)
+    local T = sdk.find_type_definition("snow.enemy.EnemyDamageStockParam")
+    local stk = T:create_instance()
+
+    stk:set_field("<DamageType>k__BackingField", dmg_type or 0)  -- 0=cut,1=impact,2=shot
+    stk:set_field("<Damage>k__BackingField", raw_dmg or 30.0)
+    stk:set_field("<IsHitDamage>k__BackingField", true)
+    stk:set_field("<IsValid>k__BackingField", true)
+
+    return stk
+end
+
+
+local function make_action_attr()
+    local T = sdk.find_type_definition("snow.enemy.EnemyDef.DamageActionAttr")
+    return T:create_instance()
+end
+
+
+
+local _captured_category9_no = nil
+local _captured_ready = false
+
+
+local function get_field(obj, name)
+    local td = obj:get_type_definition()
+    local f = td:get_field(name)
+    if not f then return nil end
+    return f:get_data(obj)
+end
+
+local function set_field(obj, backing_name, value)
+    local td = obj:get_type_definition()
+    local f = td:get_field(backing_name)
+    if not f then return end
+    pcall(function() f:set_data(obj, value) end)
+end
+
+
+
+local sdk = sdk
+
+-- Estado do buff
+local buff_ativo = false
+local tempo_fim = 0
+local ultimo_print = 0
+
+-- Configuração global do buff
+local stacks_global = 5
+local bonus_global = 5
+local duracao_global = 5
+
+-- Função segura de print
+local function sprint(...) pcall(print, ...) end
+
+-- Função para obter PlayerQuestBase
+local function get_player_questbase()
+    local pm = sdk.get_managed_singleton("snow.player.PlayerManager")
+    if not pm then return nil end
+    local master = pm:call("findMasterPlayer")
+    if not master then return nil end
+    local ok, pq = pcall(function() return sdk.to_managed_object(master) end)
+    if ok and pq then return pq end
+    return nil
+end
+
+-- Hook permanente no método update
+local tdef = sdk.find_type_definition("snow.player.PlayerQuestBase")
+if not tdef then
+    return
+end
+
+local update_method = tdef:get_method("update")
+if not update_method then
+    return
+end
+
+local enabled = true
+sdk.hook(
+    update_method,
+    function(args)
+        if not enabled then return end
+        local pq = get_player_questbase()
+        if not pq then return end
+        if not buff_ativo then return end
+
+        local ok = pcall(function()
+            if forte_ativo then
+                pq:call("setCritChanceUpBow", 10, 5.0)
+                pq:call("setAtkUpBuffSecond", 10, 5.0)
+              
+                
+            else    
+                pq:call("setCritChanceUpBow", 5, 5.0)
+                pq:call("setAtkUpBuffSecond", 5, 5.0)
+            end    
+        end)
+    end,
+    function(retval) return retval end
+)
+
+re.on_frame(function()
+    if buff_ativo then
+        local agora = os.clock()
+
+        if agora - ultimo_print >= 1 then
+            ultimo_print = agora
+            local restante = math.max(0, tempo_fim - agora)
+            if forte_ativo then
+                 SpawnEffectOnPlayer_Visual(
+                    100,--containerID,
+                    1002,--elementID,
+                    "AstGreen",--color_name,
+                    0,--delay,
+                    1.0,--speed,
+                    false,--disable_effect,
+                    nil--duration
+
+                )
+
+            else    
+                SpawnEffectOnPlayer_Visual(
+                    100,--containerID,
+                    1002,--elementID,
+                    "tentativaMarelo",--color_name,
+                    0,--delay,
+                    1.0,--speed,
+                    false,--disable_effect,
+                    nil--duration
+
+                )
+            end    
+        end
+
+        if agora >= tempo_fim then
+            buff_ativo = false
+        end
+    end
+end)
+
+local function aplicar_crit_boost(stacks, bonus, duracao,forte)
+    stacks_global = stacks or stacks_global
+    bonus_global = bonus or bonus_global
+    duracao_global = duracao or duracao_global
+    forte_ativo = forte   
+
+    buff_ativo = true
+    tempo_fim = os.clock() + duracao_global
+    ultimo_print = os.clock() 
+end
+
+
+local function read_int32_array(a)
+    if not a then return nil end
+
+    local t = {}
+    local len = a:call("get_Length")
+
+    for i = 0, len - 1 do
+        local elem = a:get_element(i)
+        t[i] = elem and elem:get_field("mValue") or 0
+    end
+
+    return t
+end
+
+
+-- cache global
+lastBlastCount = lastBlastCount or {}
+
+local system_array = sdk.find_type_definition("System.Array")
+local get_length = system_array:get_method("get_Length")
+local get_value  = system_array:get_method("GetValue(System.Int32)")
+
+local int32_type = sdk.find_type_definition("System.Int32")
+local int32_value = int32_type:get_field("mValue")
+
+function CheckBlast(enemy, hit_pos)
+    if not enemy then return end
+
+    local dmg = enemy:call("get_DamageParam")
+    if not dmg then return end
+
+    local blast = dmg:get_field("_BlastParam")
+    if not blast then return end
+
+    local actArr = blast:call("get_ActivateCount()")
+    if not actArr then return end
+
+    -- segurança
+    local len = get_length:call(actArr)
+    if not len or len == 0 then return end
+
+    -- pegar System.Int32
+    local valType = get_value:call(actArr, 0)
+    if not valType then return end
+
+    local count = int32_value:get_data(valType)
+
+    -- comparação correta
+    local last = lastBlastCount[enemy]
+    if last == nil then
+        lastBlastCount[enemy] = count
+        return
+    end
+
+    if count > last then
+        -- BLAST acabou de ocorrer (frame seguinte ao hit)
+        SpawnEffectCustom(hit_pos, 200, 1011, 1.5, "White", 1.0)
+    end
+
+    lastBlastCount[enemy] = count
+end
+
+local system_array = sdk.find_type_definition("System.Array")
+local get_length = system_array:get_method("get_Length")
+local get_value  = system_array:get_method("GetValue(System.Int32)")
+
+local single_type = sdk.find_type_definition("System.Single")
+local single_value = single_type:get_field("mValue")
+
+function LerBlastCount(enemy)
+    if not enemy then return nil end
+
+    local dmg_param = enemy:call("get_DamageParam")
+    if not dmg_param then return nil end
+
+    local blast_param = dmg_param:get_field("_BlastParam")
+    if not blast_param then return nil end
+
+    local stock_arr = blast_param:call("get_Stock()")
+    if not stock_arr then return nil end
+
+    local len = get_length:call(stock_arr)
+    if not len or len == 0 then return nil end
+
+    local valtype = get_value:call(stock_arr, 0)
+    if not valtype then return nil end
+
+    local stock_value = single_value:get_data(valtype)
+
+    return stock_value   
+end
+
+
+function LerAguaCount(enemy)
+    if not enemy then return nil end
+
+    local dmg_param = enemy:call("get_DamageParam")
+    if not dmg_param then return nil end
+
+    local blast_param = dmg_param:get_field("_WaterParam")
+    if not blast_param then return nil end
+
+    local stock_arr = blast_param:call("get_Stock()")
+    if not stock_arr then return nil end
+
+    local len = get_length:call(stock_arr)
+    if not len or len == 0 then return nil end
+
+    local valtype = get_value:call(stock_arr, 0)
+    if not valtype then return nil end
+
+    local stock_value = single_value:get_data(valtype)
+
+    return stock_value   
+end
+
+
+local system_array_type = sdk.find_type_definition("System.Array")
+local set_value_method =
+    system_array_type:get_method("SetValue(System.Object,System.Int32)")
+
+
+local function set_array_value(arr, index, value)
+    sdk.call_object_func(
+        arr,
+        "SetValue(System.Object,System.Int32)",
+        value,
+        index
+    )
+end
+
+local timers = {}
+
+local function start_timer(seconds, on_finish, enemy)
+    local id = {}
+
+    timers[id] = {
+        start = os.clock(),
+        duration = seconds,
+        callback = on_finish,
+        enemy = enemy
+    }
+
+    return id
+end
+re.on_frame(function()
+    local now = os.clock()
+
+    for id, t in pairs(timers) do
+        if now - t.start >= t.duration then
+            -- executa callback
+            if t.callback then
+                t.callback(t.enemy)
+            end
+
+            -- remove timer
+            timers[id] = nil
+        end
+    end
+end)
+
+
+
+
+local function restore_addlimitAndTimer(enemy, paralyze_param)
+    if not enemy or not sdk.is_managed_object(enemy) then return false end
+    if not paralyze_param or not sdk.is_managed_object(paralyze_param) then return false end
+    if not addL or not addL[enemy] then
+        return false
+    end
+    paralyze_param:call("set_ActiveTime(System.Single)",timeP[enemy])
+    contPA[enemy] = false
+
+
+    local old = paralyze_param:call("get_AddLimit")
+    if not old then
+        return false
+    end
+
+    local len = old:get_Length()
+    if len <= 0 then return false end
+
+    local arr = sdk.create_managed_array("System.Single", len)
+
+    for i = 0, len - 1 do
+        local v = addL[enemy][i]
+
+        if type(v) ~= "number" or v ~= v or v == math.huge or v == -math.huge then
+            v = tonumber(old[i]) or 0.0
+        end
+
+        arr[i] = v
+    end
+
+    paralyze_param:call("set_AddLimit(System.Single[])", arr)
+
+    
+
+    -- limpa para não repetir
+    addL[enemy] = nil
+
+    return true
+end
+
+
+function ResetaBlast(enemy, Add)
+    if not enemy then return end
+
+    local dmg_param = enemy:call("get_DamageParam")
+    if not dmg_param then return end
+
+    local blast_param = dmg_param:get_field("_BlastParam")
+    if not blast_param then return end
+
+    -- Restaurar dano
+    if BlastDmg[enemy] ~= nil then
+        blast_param:call(
+            "set_BlastDamage(System.Single)",
+            BlastDmg[enemy]
+        )
+    end
+
+    if not Add then return end
+
+    -- AddLimit (System.Single[])
+    local old = blast_param:call("get_AddLimit()")
+    if not old then return end
+
+    local len = sdk.call_object_func(old, "get_Length")
+    if not len then return end
+
+    local arr = sdk.create_managed_array("System.Single", len)
+
+    for i = 0, len - 1 do
+        local v = addB[enemy] and addB[enemy][i] or 0.0
+        local boxed = sdk.create_single(v)
+
+        sdk.call_object_func(
+            arr,
+            "SetValue(System.Object,System.Int32)",
+            boxed,
+            i
+        )
+    end
+
+    blast_param:call("set_AddLimit(System.Single[])", arr)
+end
+
+
+
+function MudaStock(enemy,y,x)
+
+                 
+
+                    if not enemy then return end
+
+               
+                    local params = enemy:call("get_DamageParam()")
+                    if not params then
+                        return
+                    end
+
+                    local st = params:call("get_DamageStock()")
+                    if not st then
+                        return
+                    end
+
+                   
+                    local count = nil
+
+                    -- Caso List<T>
+                    count = st:get_field("_size")
+
+                    -- Caso Array
+                    if not count then
+                        count = st:call("get_Length")
+                    end
+
+                    -- Caso propriedade Count
+                    if not count then
+                        count = st:call("get_Count")
+                    end
+
+
+                    if not count or count <= 0 then
+                        return
+                    end
+
+                  
+                    for i = 0, count - 1 do
+                        local stock = nil
+
+                        -- List<T>
+                        stock = st:call("get_Item", i)
+
+                        -- Array fallback
+                        if not stock then
+                            stock = st[i]
+                        end
+
+                        if not stock then goto continue end
+
+
+                        local ok1, orig = pcall(function()
+                            return stock:call("get_OriginalDamage")
+                        end)
+
+                        local ok2, dtype = pcall(function()
+                            return stock:call("get_DamageType")
+                        end)
+
+                        local ok3, cond = pcall(function()
+                            return stock:call("get_ConditionDamage")
+                        end)
+
+                        
+                        
+
+                        local enum_value = sdk.create_int32(4)
+                        stock:call("set_ForceConditionDamageType", enum_value)
+                        -- 1) Criar array gerenciado de float (Single)
+                        local arr = sdk.create_managed_array("System.Single", 18)
+
+                        
+
+                        
+                        arr[y] = x
+
+                        -- 3) Chamar o setter
+                        stock:call("set_ConditionDamage", arr)
+
+
+                        ::continue::
+                    end
+
+
+
+    
+end    
+
+
+
+function GetPlayerElements()
+    -- PlayerManager
+    local pm = sdk.get_managed_singleton("snow.player.PlayerManager")
+    if not pm then
+        return nil, "SEM PLAYER MANAGER"
+    end
+
+    -- Player principal
+    local player = pm:call("findMasterPlayer()")
+    if not player then
+        return nil, "SEM MASTERPLAYER"
+    end
+
+    -- PlayerData
+    local pdata = player:call("get_PlayerData()")
+    if not pdata then
+        return nil, "SEM PLAYERDATA"
+    end
+
+    -- leitura dos campos
+    local elements = {
+        element_type_1  = pdata:get_field("_ElementType"),
+        element_type_2  = pdata:get_field("_ElementType2nd"),
+        element_value_1 = pdata:get_field("_ElementAttack"),
+        element_value_2 = pdata:get_field("_ElementAttack2nd")
+    }
+
+    return elements
+end
+
+function reaplicaPara(enemy)
+
+                 local dmg_param = enemy:call("get_DamageParam")
+                local ativo = false
+                local stock = false
+                local enable = false
+                if dmg_param then
+                    local paralyze_param = dmg_param:get_field("_ParalyzeParam") 
+                    ativo = paralyze_param:call("get_IsActive()")
+                    stock = paralyze_param:call("get_IsStockEnable()")
+                    enable = paralyze_param:call("get_IsUseAddTiredTime()")
+                    if timeP[enemy] == nil then
+                        contPA[enemy] = false
+                        timeP[enemy] = paralyze_param:call("get_ActiveTime()")
+                    end    
+
+                    
+                    
+                    
+                end    
+                
+                
+                
+                if paralyze_finished[enemy] and ativo ~= true and contPA[enemy] == false and stock == true and timerPA[enemy] then
+                    local pv = _G.paralyze_values[enemy]
+                    local ns = _G.normalstate_values[enemy]
+
+                   
+                    local list = _G.g_paralyze_list or {}
+                    local pv = _G.paralyze_values[enemy]
+                    local ns = _G.normalstate_values[enemy]
+                    local damage_param = enemy:call("get_DamageParam")
+                    if damage_param then
+                        local paralyze_param = damage_param:get_field("_ParalyzeParam")                        
+                        
+
+                        paralyze_param:call("set_ActiveTime(System.Single)",3.0)
+                       
+
+                        local activateCount = paralyze_param:call("get_ActivateCount()")
+                        local len1 = activateCount:call("get_Length")
+                        local arr1 = sdk.create_managed_array("System.Single", len1)
+                        for i = 0, len1 - 1 do
+                            arr1[i] = len1 - 2
+                        end
+                        paralyze_param:call("set_ActivateCount(System.Single[])", arr1)
+
+                        local old = paralyze_param:call("get_AddLimit()")
+                        if not old then
+                            return
+                        end
+
+                        local len = old:call("get_Length")
+
+                        
+                        local function read_single_array(a)
+                            if not a then return nil end
+
+                            local len = a:call("get_Length")
+                            if not len or len <= 0 then return {} end
+
+                            local t = {}
+
+                            for i = 0, len - 1 do
+                                if a[i] ~= nil then
+                                    t[i] = a[i]
+
+                                -- fallback raro: struct com mValue
+                                else
+                                    local el = a.get_element and a:get_element(i)
+                                    if el and el.get_field then
+                                        t[i] = el:get_field("mValue")
+                                    end
+                                end
+                            end
+
+                            return t
+                        end
+
+
+                        if addL[enemy] == nil then
+                            addL[enemy] = read_single_array(old)
+                        end    
+                        
+
+                        local arr = sdk.create_managed_array("System.Single", len)
+
+                        for i = 0, len - 1 do
+                            arr[i] = 0.0
+                        end
+
+                        paralyze_param:call("set_AddLimit(System.Single[])", arr)
+
+                                            
+
+
+                    end
+
+                    enemy:call(
+                        "stockDirectConditionDamage(System.Single, snow.enemy.EnemyDef.ConditionDamageType)",
+                        999.0,
+                        0
+                    )                  
+                    if damage_param then
+                        local paralyze_param = damage_param:get_field("_ParalyzeParam")    
+                        local ati = paralyze_param:call("get_IsActive()")
+                        local enable = paralyze_param:call("get_IsEnable()")
+                  
+
+                        if ati or enable then
+                            contPA[enemy] = true --diz que o colateral está acontecendo
+                        end    
+                    end    
+                end
+                start_timer(5.0, function(enemy)
+                    if not enemy or not sdk.is_managed_object(enemy) then return end
+
+                    local dmg_param = enemy:call("get_DamageParam")
+                    if not dmg_param then return end
+
+                    local para_param = dmg_param:get_field("_ParalyzeParam")
+                    if not para_param or not sdk.is_managed_object(para_param) then return end
+
+                    restore_addlimitAndTimer(enemy, para_param)
+                end, enemy)
+
+                   local damage_param = enemy:call("get_DamageParam")
+                   if damage_param then
+                        local paralyze_param = damage_param:get_field("_ParalyzeParam")
+                        if contPA[enemy] == false then                   
+                            paralyze_param:call("set_ActiveTime(System.Single)",timeP[enemy])
+                            
+
+                        end
+
+                    end
+end
+
+-- Hook para capturar hits com log completo
+sdk.hook(after_calc_method,
+    function(args)
+        _G.last_args = args
+    end,
+    function(retval)
+        if not _G.last_args then return retval end
+
+        local enemy = sdk.to_managed_object(_G.last_args[2])
+        local damage_info =
+            sdk.to_managed_object(_G.last_args[3]) or
+            sdk.to_managed_object(_G.last_args[2])
+        if not enemy or not damage_info then return retval end
+
+        local now = get_time()
+        local cond_type = get_condition_type:call(damage_info) or 0
+        local cond_damage = get_condition_damage:call(damage_info) or 0
+     
+        --local cond_type2 = get_condition_type2:call(damage_info) or 0
+        --local cond_damage2 = get_condition_damage2:call(damage_info) or 0
+        local attacker_type = get_damage_attacker_type:call(damage_info)
+
+        local hit_pos = hitpos:call(damage_info)
+        --100|640(Fadinha)
+        --100|1050(Stun)
+        --100|1403(Virus fumacinha)
+        --100|1032(Paralisia)
+        --100|1035(Teia em X)
+        --100|1036(Teia em loop)
+        --100|1037(Teia simples)
+        --150|200 (Choquinho)
+        --150|15 (Lamina)
+        --150|11 (Lamina rapidinha)
+        --150|10 (lamina tmb) 
+        --150|100 (Aura)?
+        --150|300 (Aura Azul)
+        --150|4000
+        --50|6001 ~6005 (Efeito somente da SnS)
+        --100|1405 (Virus 2)
+        --100|1033 (Boia)
+        --100|1034 (Boia grande)
+        --100|1012 (Explosoes pequenas)
+        -- 0 |810 (Fumaça rosa)
+        -- 0 |1000 (Pancada forte)
+        --100|1500 (Fumacinha Malzeno)
+        --100|1502 (Malzeno treco)
+        --100|1200 (Sangramento)
+        --100|1201 (Sangramento 2)
+        --100|1202 (Sangramento 3)
+        local hit_pos = hitpos:call(damage_info)
+        local crithit = crit:call(damage_info)
+        local weap = weapon:call(damage_info)
+        local eleType = elementType:call(damage_info)
+        local eledmg1 = elementDmg1:call(damage_info)
+        local eledmg2 = elementDmg2:call(damage_info)
+        local eledmg3 = elementDmg3:call(damage_info)
+
+
+        if weap == 4 or weap == 3 or weap == 13 then return end
+        attacker = attacker_type
+      
+        local elems, err = GetPlayerElements()
+        if attacker_type == 0 and blighted_enabled == false then
+            EnableBlightedElement(true)
+        end
+        if enemy then      
+
+            if BlastDmg[enemy]~= nil then
+                ResetaBlast(enemy,false)
+            end
+            if FireOk[enemy] == true then
+                
+                CriarHookElemental()
+
+            end    
+            if IceOk[enemy] == true then
+                CriarHookElemental()
+            end    
+        end                    
+          
+        if cond_type == 0 then
+            reaplicaPara(enemy)
+        end    
+      
+        local dmg_param = enemy:call("get_DamageParam")
+
+                    if dmg_param then
+                        local sleep_param = dmg_param:get_field("_SleepParam") 
+                        enable = sleep_param:call("get_IsActive()")
+                        if enable then
+                            
+                        else
+                            sleepOk[enemy] = false    
+                        end    
+                        
+                    end 
+        if sleepOk[enemy] then
+               
+                if not enemy then return end
+
+               
+                local params = enemy:call("get_DamageParam()")
+                if not params then
+                    return
+                end
+
+                local st = params:call("get_DamageStock()")
+                if not st then
+                    return
+                end
+
+              
+                local count = nil
+
+                count = st:get_field("_size")
+
+                if not count then
+                    count = st:call("get_Length")
+                end
+
+                if not count then
+                    count = st:call("get_Count")
+                end
+
+
+                if not count or count <= 0 then
+                    return
+                end
+
+           
+                for i = 0, count - 1 do
+                    local stock = nil
+
+                    stock = st:call("get_Item", i)
+
+                    if not stock then
+                        stock = st[i]
+                    end
+
+                    if not stock then goto continue end
+
+                    local ok1, orig = pcall(function()
+                        return stock:call("get_OriginalDamage")
+                    end)
+
+                    local ok2, dtype = pcall(function()
+                        return stock:call("get_DamageType")
+                    end)
+
+                    local ok3, cond = pcall(function()
+                        return stock:call("get_ConditionDamage")
+                    end)
+
+             
+
+
+                    local enum_value = sdk.create_int32(4)
+                    stock:call("set_ForceConditionDamageType", enum_value)
+                    -- 1) Criar array gerenciado de float (Single)
+                    local arr = sdk.create_managed_array("System.Single", 18)
+
+                    
+
+             
+                  
+                        
+                    arr[2] = 99999.0               
+
+
+                    -- 3) Chamar o setter
+                    stock:call("set_ConditionDamage", arr)
+
+                    if dmg_param then
+                        local sleep_param = dmg_param:get_field("_StunParam") 
+                        enable = sleep_param:call("get_IsActive()")
+                        if enable then
+                            
+                            sleepOk[enemy] = false
+                        end              
+                        
+                    end 
+                    ::continue::
+                end
+        end    
+
+        
+        if cond_type == 0 and attacker_type == 0 then
+            local category, simple_category, color = nil, nil, nil
+            if elems.element_type_1 == 8 and (elems.element_value_1 > 50) then
+                category = "FORTE (>50)"
+                simple_category = "FORTE0"
+                color = color_map.Yellow
+                speed = 0.4
+                if last_container then
+                    schedule_effect(last_container, color,speed, 0.2)
+
+                end
+                SpawnEffectCustom(hit_pos, 100, 1050, 1.5, "Yellow", 1.4)
+                SpawnEffectCustom(hit_pos, 100, 901, 0.4, "Yellow", 0.1)
+
+                SpawnEffectCustom(hit_pos, 100, 1006, 0.4, "Yellow", 0.9)
+            elseif elems.element_type_1 == 8 and (elems.element_value_1 >= 35 and elems.element_value_1<=50) then
+                category = "MEDIO (35-50)"
+                simple_category = "MEDIO0"
+                speed = 0.5
+                color = color_map.LtGray
+                local id=enemy:call("getConditionDamageEffectId(snow.enemy.EnemyDef.ConditionDamageEffectType)",0)
+                local contid=id:call("get_containerID")
+                local elementid=id:call("get_elementID")
+                if last_container then
+                    schedule_effect(last_container, color,speed, 0.2)
+
+                end
+                SpawnEffectCustom(hit_pos, 100, 1050, 1.5, "LtGray", 1.4)
+                SpawnEffectCustom(hit_pos, 100, 1006, 0.4, "Yellow", 1.8)
+
+                SpawnEffectCustom(hit_pos, 100, 1006, 0.4, "Yellow", 0.9)
+
+               
+
+             
+                local dmg_param = enemy:call("get_DamageParam")
+                local ativo = false
+                local stock = false
+                local enable = false
+                if dmg_param then
+                    local paralyze_param = dmg_param:get_field("_ParalyzeParam") 
+                    ativo = paralyze_param:call("get_IsActive()")
+                    stock = paralyze_param:call("get_IsStockEnable()")
+                    enable = paralyze_param:call("get_IsUseAddTiredTime()")
+                    if timeP[enemy] == nil then
+                        contPA[enemy] = false
+                        timeP[enemy] = paralyze_param:call("get_ActiveTime()")
+                    end    
+
+                    
+            
+                    
+                end    
+                
+                
+                
+                
+                  
+                color = color_map.LtGray
+                speed = 0.7
+                if last_container then
+                    schedule_effect(last_container, color,speed, 0.4)
+                end
+                
+                
+
+            else
+            
+            end
+
+
+            local monster_name = get_monster_name(enemy)
+            local monster_size = is_boss_enemy_method:call(enemy) and "Grande" or "Pequeno"
+            
+            
+
+            table.insert(recent_hits, {
+                enemy = enemy,
+                time = now,
+                damage = cond_damage,
+                category = category,
+                simple_category = simple_category,
+                monster_name = monster_name,
+                monster_size = monster_size
+            })
+
+            if last_container then
+                schedule_effect(last_container, color,speed, 0.2)
+            end
+
+            clean_old_hits()
+        end
+
+        if cond_type == 4 and attacker_type == 0 then
+            local category, simple_category, color = nil, nil, nil
+            if elems.element_type_1 == 6 and elems.element_value_1 > 50 then
+                category = "FORTE (>50)"
+                simple_category = "FORTE"
+                color = color_map.Red
+                speed = 0.3
+
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.2)  -- note a 
+                end
+
+                
+                if math.random()<0.4 then
+
+                    SpawnEffectCustom(hit_pos, 100, 1037, 0.7,"DarkRed", 1.0)
+                    SpawnEffectCustom(hit_pos, 100, 1033, 0.3, "DarkRed", 0.01)
+                    SpawnEffectCustom(hit_pos, 100, 1005, 0.4, "DeepPink", 1.8)
+
+                end   
+                SpawnEffectCustom(hit_pos, 100, 900, 0.2, "DarkRed", 0.01)
+                SpawnEffectCustom(hit_pos, 100, 901, 0.3, "DeepPink", 0.01)
+
+
+
+            elseif elems.element_type_1 == 6 and (elems.element_value_1 >= 35 and elems.element_value_1<=50) then
+                category = "MEDIO (35-50)"
+                simple_category = "MEDIO"
+                speed = 0.3
+                color = color_map.LightRed
+
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.2)  -- note a 
+
+                end
+                if math.random()<0.4 then
+                    SpawnEffectCustom(hit_pos, 100, 1037, 0.7,"DeepPink", 1.0)
+                    SpawnEffectCustom(hit_pos, 100, 1033, 0.3, "DeepPink", 0.01)
+                    SpawnEffectCustom(hit_pos, 100, 1005, 0.4, "DeepPink", 1.8)
+
+                end   
+                SpawnEffectCustom(hit_pos, 100, 900, 0.2, "DeepPink", 0.01)
+                SpawnEffectCustom(hit_pos, 100, 901, 0.3, "DeepPink", 0.01)
+
+
+
+
+
+            else
+
+                return retval
+            end
+
+
+            local monster_name = get_monster_name(enemy)
+            local monster_size = is_boss_enemy_method:call(enemy) and "Grande" or "Pequeno"
+
+            table.insert(recent_hits, {
+                enemy = enemy,
+                time = now,
+                damage = cond_damage,
+                category = category,
+                simple_category = simple_category,
+                monster_name = monster_name,
+                monster_size = monster_size
+            })
+
+            
+
+            clean_old_hits()
+        end
+
+        if cond_type == 10 and attacker_type == 0 then
+            local category, simple_category, color = nil, nil, nil
+            if elems.element_type_1 == 4 and elems.element_value_1>50 then
+                category = "FORTE (>50)"
+                simple_category = "FORTE10"
+                SpawnConditionVisual(enemy, 5, "Blue", 0.1, 1.5, false, 5.5)
+                local ice, delta2 = compare_enemy_stock(enemy, "_IceParam") --ERRO AQUI
+                
+                if (ice.stock.player + cond_damage) >= ice.limit.player and ice.limit.player ~= 0 then
+                    IceOk[enemy] = true
+                elseif ice.is_active ~= true then IceOk[enemy] = false end
+                color = color_map.LtGray
+                speed = 0.5
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.3)  -- note a mudança
+                end
+                local chance
+                if weap == 0 then
+                    chance = 1.0
+                elseif weap == 8 or weap == 9 then
+                    chance = 0.4
+                else
+                    chance = 0.6
+                end
+                if math.random()< chance then
+
+                    SpawnEffectCustom(hit_pos, 100, 1600, 2.4, "LtGray", 1.8)
+                end
+                    SpawnEffectCustom(hit_pos, 0, 101, 0.5, "DkGray", 0.2)
+
+                    SpawnEffectCustom(hit_pos, 100, 160, 1.0, "LtGray", 1.0)
+                    SpawnEffectCustom(hit_pos, 100, 1003, 0.3, "LtGray", 1.5)
+                    SpawnEffectCustom(hit_pos, 100, 1003, 0.3, "LtGray", 1.5)
+
+            elseif elems.element_type_1 == 4 and (elems.element_value_1 >= 35 and elems.element_value_1<=50) then
+                category = "MEDIO (35-50)"
+                simple_category = "MEDIO10"
+                speed = 0.8
+                color = color_map.White
+              
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.3)  -- note a mudança
+                end
+
+
+                    SpawnEffectCustom(hit_pos, 100, 160, 1.0, "Gray", 1.0)
+                    SpawnEffectCustom(hit_pos, 100, 1003, 0.3, "Gray", 1.5)
+                    SpawnEffectCustom(hit_pos, 100, 1003, 0.3, "Gray", 1.5)
+            else
+
+                return retval
+            end
+           
+
+
+
+            local monster_name = get_monster_name(enemy)
+            local monster_size = is_boss_enemy_method:call(enemy) and "Grande" or "Pequeno"
+
+            table.insert(recent_hits, {
+                enemy = enemy,
+                time = now,
+                damage = cond_damage,
+                category = category,
+                simple_category = simple_category,
+                monster_name = monster_name,
+                monster_size = monster_size
+            })
+
+            if last_container then
+                schedule_effect(last_container, color,speed, 0.2)
+            end
+
+            clean_old_hits()
+        end
+
+        if cond_type == 9 and attacker_type == 0 then
+            local category, simple_category, color = nil, nil, nil
+            if elems.element_type_1 == 1 and (elems.element_value_1 >50) then
+                category = "FORTE (>50)"
+                simple_category = "FORTE9"
+                speed = 1.1
+                
+                color = color_map.LFogoParte2
+
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.2)  -- note a mudança
+
+                end
+
+                color = color_map.LFogoParte2
+                speed = 0.7
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.4)  -- note a mudança
+                end
+                
+                if weap == 0 then
+                    chance = 0.1
+                elseif weap == 8 or weap == 9 then
+                    chance = 0.01
+                else
+                    chance = 0.05
+                end
+
+                if math.random()<chance then
+                    check_and_restore_sharpness()
+                end
+                local params = enemy:call("get_DamageParam()")
+
+
+                if math.random() < 0.3 then
+                    if SpawnConditionVisual then
+                        SpawnConditionVisual(enemy, 0, "LFogoParte1", 0.1, 1.5, false, 0.5)
+                    end
+                end
+                color = color_map.LFogoParte1
+                speed = 1.3
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.5)  -- note a mudança
+                end
+                
+                SpawnEffectCustom(hit_pos, 200, 1010, 1.5,"White", 0.5)
+                SpawnEffectCustom(hit_pos, 200, 1000, 1.5, "Yellow", 0.2)
+                SpawnEffectCustom(hit_pos, 200, 1010, 1.8,"LightBlue", 0.5)
+
+                if math.random()<0.2 then
+                    SpawnEffectCustom(hit_pos, 100, 1090, 1.1, "Orange", 1.6)
+                    SpawnEffectCustom(hit_pos, 100, 376, 0.5,"White", 2.0)
+
+                end    
+
+                SpawnEffectCustom(hit_pos, 100, 1090, 1.5, "Orange", 1.0)
+
+
+
+                local net = enemy:call("converDamageParamToDamagePacket(snow.hit.EnemyCalcDamageInfo.AfterCalcInfo_DamageSide)",damage_info)
+                local param = enemy:call("convertDamagePacketToDamageParam(snow.enemy.network.EnemyDamagePacket)",net)
+            
+                local damageCore = enemy:call("calcDamageCore(snow.enemy.EnemyDamageCalcParam)",param)  
+                local dmg_param = enemy:call("get_DamageParam")
+                local ativo = false
+                FireOk[enemy] = false
+                if dmg_param then
+                    local fire_param = dmg_param:get_field("_FireParam") 
+                    ativo = fire_param:call("get_IsActive()")
+                    if damageCore and ativo then                       
+                       
+                        SpawnEffectCustom(hit_pos, 200, 600, 1.0,"WFire", 1.0)
+                        FireOk[enemy] = true
+                    end
+                end    
+            
+            elseif elems.element_type_1 == 1 and (elems.element_value_1 >= 35 and elems.element_value_1<=50) then
+                category = "MEDIO (35-50)"
+                simple_category = "MEDIO9"
+                speed = 1.1
+                
+                color = color_map.Orange
+
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.2)  
+
+                end
+                
+                color = color_map.DarkOrange
+                speed = 0.7
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.3)  
+                end
+                if weap == 0 then
+                    chance = 0.1
+                elseif weap == 8 or weap == 9 then
+                    chance = 0.01
+                else
+                    chance = 0.05
+                end
+
+                if math.random()<chance then
+                    check_and_restore_sharpness()
+                end    
+                SpawnEffectCustom(hit_pos, 100, 1100, 0.6,"White", 1.0)
+
+                SpawnEffectCustom(hit_pos, 100, 1037, 1.1,"DarkOrange", 1.0)
+                if math.random()<0.3 then
+                    SpawnEffectCustom(hit_pos, 200, 1010, 1.1,"Orange", 1.0)
+                    SpawnEffectCustom(hit_pos, 100, 375, 0.5,"White", 2.0)
+
+                end 
+                
+                
+                
+
+                
+            else
+
+                return retval
+            end
+
+            local monster_name = get_monster_name(enemy)
+            local monster_size = is_boss_enemy_method:call(enemy) and "Grande" or "Pequeno"
+
+            table.insert(recent_hits, {
+                enemy = enemy,
+                time = now,
+                damage = cond_damage,
+                category = category,
+                simple_category = simple_category,
+                monster_name = monster_name,
+                monster_size = monster_size
+            })
+
+            if last_container then
+                schedule_effect(last_container, color,speed, 0.2)
+            end
+
+            clean_old_hits()
+        end
+        if cond_type == 11 and attacker_type == 0 then
+            local category, simple_category, color = nil, nil, nil
+            if elems.element_type_1 == 3 and (elems.element_value_1 > 50) then
+                category = "FORTE (>50)"
+                simple_category = "FORTE11"
+                color = color_map.DarkOrange
+                speed = 0.2
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.2)  -- note a mudança
+                end
+
+
+                local damage_param = enemy:call("get_DamageParam")
+                local thunder_param = damage_param:get_field("_ParalyzeParam")
+                
+                speed = 0.2
+                color = color_map.AstGreen
+
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.3)  -- note a mudança
+                end
+
+
+                speed = 0.6
+                color = color_map.AstGreen
+
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.5)  -- note a mudança
+                end
+
+                local chance = 0
+
+                if weap == 0 then
+                    chance = 0.5
+                elseif weap == 8 or weap == 9 then
+                    chance = 0.2
+                else
+                    chance = 0.3
+                end
+
+                if math.random()<chance then
+                    SpawnEffectCustom(hit_pos,100, 355, 0.2, "DarkCyan", 2.1)
+
+                end 
+                SpawnEffectCustom(hit_pos, 100, 1002, 0.13, "ForestGreen", 2.5)
+
+                aplicar_crit_boost(75, 10, 5,true)
+                SpawnEffectCustom(hit_pos, 0, 1000, 0.9, "SeaGreen", 0.3)
+                SpawnEffectCustom(hit_pos, 0, 1000, 0.9, "SeaGreen", 0.3)
+                SpawnEffectCustom(hit_pos, 0, 1000, 0.9, "SeaGreen", 0.3)
+
+                SpawnEffectCustom(hit_pos, 100, 1050, 0.7, "SeaGreen", 1.0)
+                SpawnEffectCustom(hit_pos, 100, 1002, 0.8, "SeaGreen", 0.1)
+                SpawnEffectCustom(hit_pos, 100, 1002, 0.8, "SeaGreen", 0.1)
+
+                if weap == 0 then
+                    chance = 0.4
+                elseif weap == 8 or weap == 9 then
+                    chance = 0.2
+                else
+                    chance = 0.3
+                end
+
+                if math.random()<chance then
+                    local damage_param = enemy:call("get_DamageParam")
+                    local thunder_param = damage_param:get_field("_ThunderParam")
+                    local ativo = thunder_param:call("get_IsActive()")
+                    if ativo ~= true then
+                        MudaStock(enemy,2,cond_damage * 0.65)
+                        enemy:call("stockDirectConditionDamage(System.Single, snow.enemy.EnemyDef.ConditionDamageType)",cond_damage* 0.5, 11)
+
+                    end
+                    SpawnEffectCustom(hit_pos, 100, 800, 0.9, "SeaGreen", 1.5)
+
+
+                end 
+            
+            elseif elems.element_type_1 == 3 and (elems.element_value_1 >= 35 and elems.element_value_1<=50) then
+                category = "MEDIO (35-50)"
+                simple_category = "MEDIO11"
+               
+                
+
+                local damage_param = enemy:call("get_DamageParam")
+                local thunder_param = damage_param:get_field("_ParalyzeParam")
+
+          
+               
+                
+                speed = 0.2
+                color = color_map.ThYellow
+
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.2)  -- note a mudança
+                end
+
+
+                speed = 0.6
+                color = color_map.tentativaMarelo
+
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.3)  -- note a mudança
+                end
+
+                local chance = 0
+
+                if weap == 0 then
+                    chance = 0.5
+                elseif weap == 8 or weap == 9 then
+                    chance = 0.2
+                else
+                    chance = 0.3
+                end
+
+                if math.random()<chance then
+                    SpawnEffectCustom(hit_pos,100, 355, 0.16, "DkGray", 2.8)
+
+                end 
+              
+                SpawnEffectCustom(hit_pos, 100, 1004, 0.13, "Yellow", 2.5)
+
+                aplicar_crit_boost(75, 10, 5)
+
+                SpawnEffectCustom(hit_pos, 0, 1000, 0.9, "Orange", 0.3)
+                SpawnEffectCustom(hit_pos, 100, 1050, 0.7, "Orange", 1.0)
+                SpawnEffectCustom(hit_pos, 100, 1002, 0.8, "Orange", 0.1)
+                SpawnEffectCustom(hit_pos, 100, 1002, 0.8, "Orange", 0.1)
+  
+
+                local chance = 0
+
+                if weap == 0 then
+                    chance = 0.4
+                elseif weap == 8 or weap == 9 then
+                    chance = 0.1
+                else
+                    chance = 0.2
+                end
+
+                if math.random()<chance then
+                    SpawnEffectCustom(hit_pos, 100, 601, 1.3, "DarkOrange", 1.5)
+                end    
+
+
+                
+            else
+
+                return retval
+            end
+
+
+            local monster_name = get_monster_name(enemy)
+            local monster_size = is_boss_enemy_method:call(enemy) and "Grande" or "Pequeno"
+
+            table.insert(recent_hits, {
+                enemy = enemy,
+                time = now,
+                damage = cond_damage,
+                category = category,
+                simple_category = simple_category,
+                monster_name = monster_name,
+                monster_size = monster_size
+            })
+
+          
+
+            clean_old_hits()
+        end
+
+        if cond_type == 8 and attacker_type == 0 then
+            local category, simple_category, color = nil, nil, nil
+            if elems.element_type_1 == 2 and (elems.element_value_1 > 50) then
+                category = "FORTE (>50)"
+                simple_category = "FORTE8"
+                color = color_map.Orange
+                speed = 0.5
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.3)  -- note a mudança
+                end
+
+                local water, delta2 = compare_enemy_stock(enemy, "_WaterParam") --Erro
+                local stock = LerAguaCount(enemy)
+
+              
+                if ((stock + cond_damage) >= water.limit.player) and water.limit.player ~= 0 then
+                    if not enemy then return end
+                    local damage_param = enemy:call("get_DamageParam")
+                    if not damage_param then return end
+                    local water_param = damage_param:get_field("_WaterParam")
+                    if not water_param then return end
+                    if modified_water_params[enemy] == true then  return end
+                    local poisonBaseAd = damage_param:get_field("_PoisonParam")
+                    if not poisonBaseAd then return end
+                    local adjust_rate = poisonBaseAd:get_field("<PoisonDamageAdjustRateByEnemyLv>k__BackingField")
+                    if not adjust_rate or adjust_rate <= 0 then return end    
+                    local novo_dano = 0.5 + adjust_rate 
+                    water_param:set_field("<Damage>k__BackingField", novo_dano)
+                    water_param:set_field("<IsUseSlipDamage>k__BackingField",true)
+                    water_param:set_field("<DamageInterval>k__BackingField",0.5)
+                    enemy:call("setEnemyMotSpeed(snow.enemy.EnemyDef.EnemyMotSpeedType, System.Single)",0,0.8)
+                    modified_water_params[enemy] = true
+                  
+
+                
+                end
+                local chance = 0
+
+                if weap == 0 then
+                    chance = 0.6
+                elseif weap == 8 or weap == 9 then
+                    chance = 0.2
+                else
+                    chance = 0.35
+                end
+
+                if math.random()<chance then
+                    MudaStock(enemy,6,cond_damage * 2.0)
+                    SpawnEffectCustom(hit_pos, 100, 1202, 0.6, "Orange", 1.5)
+
+                end    
+                SpawnEffectCustom(hit_pos, 100, 1037, 0.8, "Orange", 0.7)
+                SpawnEffectCustom(hit_pos, 100, 1037, 0.8, "Orange", 0.7)
+
+                SpawnEffectCustom(hit_pos, 100, 1100, 1.0, "LtGray", 0.6)
+                SpawnEffectCustom(hit_pos, 100, 1005, 1.0, "Orange", 0.6)
+                SpawnEffectCustom(hit_pos, 100, 1005, 1.0, "Orange", 1.0)    
+            elseif elems.element_type_1 == 2 and (elems.element_value_1 >= 35 and elems.element_value_1<=50) then
+                category = "MEDIO (35-50)"
+                simple_category = "MEDIO8"
+        
+                local water, delta2 = compare_enemy_stock(enemy, "_WaterParam")
+               
+                
+                if ((water.stock.player + cond_damage) >= water.limit.player) and water.limit.player ~= 0.0 then
+                    if not enemy then return end
+                    local damage_param = enemy:call("get_DamageParam")
+                    if not damage_param then return end
+                    local water_param = damage_param:get_field("_WaterParam")
+                    if not water_param then return end
+                    if modified_water_params[water_param] then return end
+                  
+                    enemy:call("setEnemyMotSpeed(snow.enemy.EnemyDef.EnemyMotSpeedType, System.Single)",0,0.8)
+
+                    modified_water_params[water_param] = true
+
+                
+                end    
+                speed = 0.8
+                color = color_map.Brown
+
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.2)  -- note a mudança
+                end
+
+
+
+                color = color_map.Brown
+                speed = 0.6
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.4)  -- note a mudança
+                end
+                SpawnEffectCustom(hit_pos, 100, 1037, 0.8, "DkGray", 0.7)
+                SpawnEffectCustom(hit_pos, 100, 1037, 0.8, "DkGray", 0.7)
+
+                SpawnEffectCustom(hit_pos, 100, 1005, 1.0, "Brown", 0.6)
+                SpawnEffectCustom(hit_pos, 100, 1005, 1.0, "Brown", 0.6)
+                SpawnEffectCustom(hit_pos, 100, 1005, 1.0, "Brown", 1.0)
+
+            else
+
+                return retval
+            end
+
+
+            local monster_name = get_monster_name(enemy)
+            local monster_size = is_boss_enemy_method:call(enemy) and "Grande" or "Pequeno"
+
+            table.insert(recent_hits, {
+                enemy = enemy,
+                time = now,
+                damage = cond_damage,
+                category = category,
+                simple_category = simple_category,
+                monster_name = monster_name,
+                monster_size = monster_size
+            })
+
+            
+            if last_container then
+                schedule_effect(last_container, color,speed, 0.2)
+            end
+
+            clean_old_hits()
+        end
+
+        if cond_type == 5 and attacker_type == 0 then
+            local category, simple_category, color = nil, nil, nil
+            if elems.element_type_1 == 9 and (elems.element_value_1 > 50) then
+                category = "FORTE (>50)"
+                simple_category = "FORTE5"
+               local damage_param = enemy:call("get_DamageParam")
+                
+                local blast_param = damage_param:get_field("_BlastParam")
+                 
+                local blas, delta2 = compare_enemy_stock(enemy, "_BlastParam")
+                color = color_map.LtGray
+                speed = 0.9
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.2)  -- note a mudança
+                end
+            
+                local test = 0
+                test = LerBlastCount(enemy)
+
+              
+                
+                if (test + cond_damage) >= blas.limit.player then
+                    SpawnEffectCustom(hit_pos, 0, 1000, 0.4, "LightBlue", 0.2)
+                    SpawnEffectCustom(hit_pos, 200, 2000, 0.7, "White", 1.8)
+                    SpawnEffectCustom(hit_pos, 200, 2001, 1.0, "White", 1.8)
+
+                    if BlastDmg[enemy] == nil then
+                        BlastDmg[enemy]= blast_param:call("get_BlastDamage()")
+                    end
+                    blast_param:call("set_BlastDamage",BlastDmg[enemy] + 25)
+                    local fire_param = damage_param:get_field("_FireParam")
+                    if math.random()<0.35 then
+                        fire_param:call("activate(snow.enemy.EnemyDef.ConditionDamageParamType)",0)
+                    end
+                end    
+
+              
+
+                if blas.stock.player > (blas.limit.player /2) then
+                    color = color_map.LFogoParte1
+                    speed = 0.8
+                    if last_container then
+                        schedule_effect(last_container, color, speed, 0.3)  -- note a mudança
+                    end
+                    SpawnEffectCustom(hit_pos, 200, 2000, 0.4, "White", 1.8)
+                    SpawnEffectCustom(hit_pos, 200, 1010, 0.5, "SkyBlue", 1.5)
+                    SpawnEffectCustom(hit_pos, 100, 1090, 0.6, "White", 1.9)
+                    SpawnEffectCustom(hit_pos, 100, 375, 0.6, "White", 2.5)
+
+                else
+                    SpawnEffectCustom(hit_pos, 100, 602, 0.6, "DarkOrange", 0.5)
+                    SpawnEffectCustom(hit_pos, 200, 1020, 1.0, "Orange", 0.5)
+                    SpawnEffectCustom(hit_pos, 0, 800, 1.0, "Black", 2.5)
+                    SpawnEffectCustom(hit_pos, 100, 375, 0.6, "White", 2.5)
+
+                    SpawnEffectCustom(hit_pos, 200, 1010, 1.0, "Orange", 0.5)
+                    SpawnEffectCustom(hit_pos, 100, 1011, 0.6, "White", 1.0)
+                end    
+                
+            elseif elems.element_type_1 == 9 and (elems.element_value_1 >= 35 and elems.element_value_1<=50) then
+                category = "MEDIO (35-50)"
+                simple_category = "MEDIO5"
+                
+                local damage_param = enemy:call("get_DamageParam")
+                
+                local blast_param = damage_param:get_field("_BlastParam")
+                 
+                local blas, delta2 = compare_enemy_stock(enemy, "_BlastParam")
+                color = color_map.White
+                speed = 1.0
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.2)  -- note a mudança
+                end
+            
+                local test = 0
+                test = LerBlastCount(enemy)
+
+              
+              
+                if (test + cond_damage) >= blas.limit.player then
+                    SpawnEffectCustom(hit_pos, 200, 1011, 1.5, "White", 1.0)
+                    if BlastDmg[enemy] == nil then
+                        BlastDmg[enemy]= blast_param:call("get_BlastDamage()")
+                    end
+                    blast_param:call("set_BlastDamage",BlastDmg[enemy] + 25)
+                end    
+                
+
+                
+                if blas.stock.player > (blas.limit.player /2) then
+                    SpawnEffectCustom(hit_pos, 200, 1010, 1.5, "White", 0.1)
+
+                    SpawnEffectCustom(hit_pos, 200, 1001, 1.5, "White", 0.7)
+                else
+                    SpawnEffectCustom(hit_pos, 200, 1010, 1.0, "White", 0.5)
+                    SpawnEffectCustom(hit_pos, 200, 1000, 1.0, "White", 0.5)
+                end    
+                
+            else
+
+                return retval
+            end
+
+
+            local monster_name = get_monster_name(enemy)
+            local monster_size = is_boss_enemy_method:call(enemy) and "Grande" or "Pequeno"
+
+            table.insert(recent_hits, {
+                enemy = enemy,
+                time = now,
+                damage = cond_damage,
+                category = category,
+                simple_category = simple_category,
+                monster_name = monster_name,
+                monster_size = monster_size
+            })
+
+            if last_container then
+                schedule_effect(last_container, color,speed, 0.2)
+            end
+
+            clean_old_hits()
+        end
+
+
+         if cond_type == 1 and attacker_type == 0 then
+            local category, simple_category, color = nil, nil, nil
+            if elems.element_type_1 == 7 and (elems.element_value_1 > 40) then
+                category = "FORTE1 (>50)"
+                simple_category = "FORTE1"
+            
+                speed = 0.6
+                color = color_map.LtGray
+
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.2)  -- note a mudança
+                end
+
+                color = color_map.Lavanda
+                speed = 0.4
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.5)  -- note a mudança
+                end
+                
+                 local chance = 0
+
+                if weap == 0 then
+                    chance = 0.5
+                elseif weap == 8 or weap == 9 then
+                    chance = 0.1
+                else
+                    chance = 0.2
+                end
+                SpawnEffectCustom(hit_pos, 100, 600, 1.3,"LightBlue", 1.2)
+
+
+                if math.random()<chance then
+                    SpawnEffectCustom(hit_pos, 100, 160, 0.6,"Brown", 1.2)
+
+                    SpawnEffectCustom(hit_pos, 0, 100, 0.5,"Magenta", 1.5)
+                    enemy:call("setEnemyMotSpeed(snow.enemy.EnemyDef.EnemyMotSpeedType, System.Single)",3,0.1)
+
+
+                end    
+                
+                sleepOk[enemy] = true
+            elseif elems.element_type_1 == 7 and (elems.element_value_1 >= 35 and elems.element_value_1<=40) then
+                category = "MEDIO1 (35-50)"
+                simple_category = "MEDIO1"
+
+                speed = 0.6
+                color = color_map.Lavanda
+
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.2)  
+                end
+
+                color = color_map.Lavanda
+                speed = 0.4
+                if last_container then
+                    schedule_effect(last_container, color, speed, 0.4) 
+                end
+                SpawnEffectCustom(hit_pos, 100, 900, 0.4,"Lavanda", 0.3)
+                local chance = 0
+
+                if weap == 0 then
+                    chance = 0.5
+                elseif weap == 8 or weap == 9 then
+                    chance = 0.1
+                else
+                    chance = 0.2
+                end
+
+
+                if math.random()<chance then
+                    SpawnEffectCustom(hit_pos, 100, 160, 0.6,"Brown", 1.2)
+
+                    SpawnEffectCustom(hit_pos, 0, 100, 0.5,"Magenta", 1.5)
+                    enemy:call("setEnemyMotSpeed(snow.enemy.EnemyDef.EnemyMotSpeedType, System.Single)",3,0.1)
+
+
+                end 
+
+            else
+
+                return retval
+            end
+
+
+            local monster_name = get_monster_name(enemy)
+            local monster_size = is_boss_enemy_method:call(enemy) and "Grande" or "Pequeno"
+
+            table.insert(recent_hits, {
+                enemy = enemy,
+                time = now,
+                damage = cond_damage,
+                category = category,
+                simple_category = simple_category,
+                monster_name = monster_name,
+                monster_size = monster_size
+            })
+
+            if last_container then
+                schedule_effect(last_container, color,speed, 0.2)
+            end
+
+            clean_old_hits()
+        end
+
+
+        if eleType == 7 and attacker_type ~= 23 then
+            InitPlayerDataScanner(enemy,hit_pos,crithit,eledmg1,eledmg2,eledmg3,eleType,attacker_type,elems.element_value_1)
+        end
+        
+        return retval
+    end
+)
+
+local start_condition_method = enemy_character_base_type_def:get_method("startConditionDamageEffect")
+sdk.hook(start_condition_method,
+    function(args)
+        local enemy = sdk.to_managed_object(args[2])
+        local status_id = sdk.to_int64(args[3])
+        
+        if status_id == 0 and enemy then
+            local now = get_time()
+            clean_old_hits()
+
+            for i, hit in ipairs(recent_hits) do
+                if hit.enemy == enemy and (now - hit.time) <= HIT_BUFFER_TIME then
+                    
+
+                    if hit.simple_category then
+                        _G.onVenomHitDetected(hit.simple_category, hit.damage, hit.time, hit.monster_name, hit.monster_size, hit.enemy)
+                    end
+
+                    table.remove(recent_hits, i)
+                    break
+                end
+            end
+        end
+
+        if status_id == 4 and enemy then
+            local now = get_time()
+            clean_old_hits()
+
+            for i, hit in ipairs(recent_hits) do
+                if hit.enemy == enemy and (now - hit.time) <= HIT_BUFFER_TIME then
+                  
+                    if hit.simple_category then
+                        _G.onVenomHitDetected(hit.simple_category, hit.damage, hit.time, hit.monster_name, hit.monster_size, hit.enemy)
+                    end
+
+                    table.remove(recent_hits, i)
+                    break
+                end
+            end
+        end
+
+        if status_id == 8 and enemy then
+            local now = get_time()
+            clean_old_hits()
+
+            for i, hit in ipairs(recent_hits) do
+                if hit.enemy == enemy and (now - hit.time) <= HIT_BUFFER_TIME then
+                  
+                    SpawnConditionVisual(enemy, 8, "SeaGreen", 0.1, 0.3, false, 20.5)
+
+                    if hit.simple_category then
+                        _G.onVenomHitDetected(hit.simple_category, hit.damage, hit.time, hit.monster_name, hit.monster_size, hit.enemy)
+                    end
+                    table.remove(recent_hits, i)
+                    break
+                end
+            end
+        end
+        if status_id == 6 and enemy then
+            local now = get_time()
+            clean_old_hits()
+
+            for i, hit in ipairs(recent_hits) do
+                if hit.enemy == enemy and (now - hit.time) <= HIT_BUFFER_TIME then
+                   
+
+                    if hit.simple_category then
+                        _G.onVenomHitDetected(hit.simple_category, hit.damage, hit.time, hit.monster_name, hit.monster_size, hit.enemy)
+                    end
+
+                    table.remove(recent_hits, i)
+                    break
+                end
+            end
+        end
+        if status_id == 9 and enemy then
+            local now = get_time()
+            clean_old_hits()
+
+            for i, hit in ipairs(recent_hits) do
+                if hit.enemy == enemy and (now - hit.time) <= HIT_BUFFER_TIME then
+                   
+
+                    if hit.simple_category then
+                        _G.onVenomHitDetected(hit.simple_category, hit.damage, hit.time, hit.monster_name, hit.monster_size, hit.enemy)
+                    end
+
+                    table.remove(recent_hits, i)
+                    break
+                end
+            end
+        end
+        if status_id == 7 and enemy then
+            local now = get_time()
+            clean_old_hits()
+
+                
+            for i, hit in ipairs(recent_hits) do
+                if hit.enemy == enemy and (now - hit.time) <= HIT_BUFFER_TIME then
+                    
+                    
+                    if hit.simple_category then
+                        _G.onVenomHitDetected(hit.simple_category, hit.damage, hit.time, hit.monster_name, hit.monster_size, hit.enemy)
+                       
+                    end
+
+                    table.remove(recent_hits, i)
+                    break
+                end
+            end
+        end
+        local damage_param = enemy:call("get_DamageParam")
+        if not damage_param then return end
+
+        local blast_param = damage_param:get_field("_BlastParam")
+        if not blast_param then return end
+
+        local ativo = blast_param:call("get_IsActive") 
+
+        if ativo then
+            local now = get_time()
+            clean_old_hits()
+
+            for i, hit in ipairs(recent_hits) do
+                if hit.enemy == enemy and (now - hit.time) <= HIT_BUFFER_TIME then
+                  
+
+                    if hit.simple_category then
+                        _G.onVenomHitDetected(hit.simple_category, hit.damage, hit.time, hit.monster_name, hit.monster_size, hit.enemy)
+                    end
+
+                    table.remove(recent_hits, i)
+                    break
+                end
+            end
+        end
+
+        if status_id == 1 and enemy then
+            local now = get_time()
+            clean_old_hits()
+
+            for i, hit in ipairs(recent_hits) do
+                if hit.enemy == enemy and (now - hit.time) <= HIT_BUFFER_TIME then
+                    
+
+                    if hit.simple_category then
+                        _G.onVenomHitDetected(hit.simple_category, hit.damage, hit.time, hit.monster_name, hit.monster_size, hit.enemy)
+                    end
+
+                    table.remove(recent_hits, i)
+                    break
+                end
+            end
+        end
+
+    end,
+    function(retval) return retval end
+)
+
+sdk.hook(enemy_character_base_type_def:get_method("update"),
+    function(args) 
+        process_scheduled_effects()
+    end,
+    function(retval)
+        return retval
+    end
+)
