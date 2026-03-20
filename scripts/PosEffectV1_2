@@ -1,0 +1,1283 @@
+local original_intervals = {}
+local original_poison_damage = {}
+local venom_monitors = {}
+local fire_monitors = {}
+local ice_monitors = {}
+local water_monitors = {}
+local enableW = setmetatable({}, { __mode = "k" })
+ActionWatchTask = ActionWatchTask or {}
+ParalyzeByScript = ParalyzeByScript or {}
+local action_watch_cooldown = setmetatable({}, { __mode = "k" })
+local paralyze_cycle_done = setmetatable({}, { __mode = "k" })
+
+
+g_paralyze_list = {}
+NearBossTask = NearBossTask or {}
+ActionWatchSuppress = ActionWatchSuppress or {}
+local contPA2 = setmetatable({}, { __mode = "k" })
+
+local IceMov = setmetatable({}, { __mode = "k" })
+local enableWa = setmetatable({}, { __mode = "k" })
+local ParaTime = setmetatable({}, { __mode = "k" })
+
+local modified_poison_params = setmetatable({}, { __mode = "k" })
+local modified_fire_params = setmetatable({},{ __mode = "k"})
+_G.modified_water_params = setmetatable({},{ __mode = "k"})
+
+local enemy_actions = setmetatable({}, { __mode = "k" })
+paralyze_finished = setmetatable({}, { __mode = "k" })
+_G.paralyze_values = setmetatable({}, { __mode = "k" })
+_G.normalstate_values = setmetatable({}, { __mode = "k" })
+local contaPara = setmetatable({}, { __mode = "k" })
+
+
+
+local original_fire_damage = {}
+
+local force_flagelo_type = nil
+local enabled = true
+
+_G.OnQuestReset = _G.OnQuestReset or {}
+
+table.insert(_G.OnQuestReset, function()
+
+    original_intervals = {}
+    original_poison_damage = {}
+
+    venom_monitors = {}
+    fire_monitors = {}
+    ice_monitors = {}
+    water_monitors = {}
+
+    enableW = setmetatable({}, { __mode = "k" })
+    action_watch_cooldown = setmetatable({}, { __mode = "k" })
+    paralyze_cycle_done = setmetatable({}, { __mode = "k" })
+
+    contPA2 = setmetatable({}, { __mode = "k" })
+    IceMov = setmetatable({}, { __mode = "k" })
+    enableWa = setmetatable({}, { __mode = "k" })
+    ParaTime = setmetatable({}, { __mode = "k" })
+
+    modified_poison_params = setmetatable({}, { __mode = "k" })
+    modified_fire_params   = setmetatable({}, { __mode = "k" })
+    _G.modified_water_params = setmetatable({}, { __mode = "k" })
+
+    enemy_actions = setmetatable({}, { __mode = "k" })
+    paralyze_finished = setmetatable({}, { __mode = "k" })
+    _G.paralyze_values = setmetatable({}, { __mode = "k" })
+    _G.normalstate_values = setmetatable({}, { __mode = "k" })
+    contaPara = setmetatable({}, { __mode = "k" })
+
+    g_paralyze_list = {}
+    local original_fire_damage = {}
+
+    force_flagelo_type = nil
+    enabled = true
+end)
+
+
+local function install_quest_hook()
+    if quest_hook_installed then return end
+
+    local qm_td = sdk.find_type_definition("snow.QuestManager")
+    if not qm_td then
+        return
+    end
+
+    local method = qm_td:get_method("getActiveQuestUniqueNo()")
+    if not method then
+        return
+    end
+
+    sdk.hook(
+        method,
+        function(args)
+            return args
+        end,
+        function(retval)
+            return retval
+        end
+    )
+
+    quest_hook_installed = true
+end
+
+install_quest_hook()
+local function print_quest_level()
+    local qm = sdk.get_managed_singleton("snow.QuestManager")
+    if not qm then return end
+    questNo = qm:call("get_ActiveQuestNo()")
+    quest = qm:call("getQuestType()")
+    if not quest then return end
+    return quest
+end
+
+
+local function delay(seconds, callback)
+    if type(callback) ~= "function" then
+        return
+    end
+
+    local start = os.clock()
+
+    local function wrapped()
+        local ok, result = pcall(function()
+            if os.clock() - start >= seconds then
+                callback()
+                return false -- remove callback do on_frame
+            end
+        end)
+
+        if not ok then
+            return false -- remover mesmo assim
+        end
+
+        return result
+    end
+
+    re.on_frame(wrapped)
+end
+
+
+
+
+
+local condition_types = {
+    [0]  = "Paralisia",
+    [1]  = "Sono",
+    [2]  = "Sem elemento",
+    [4]  = "Veneno",
+    [5]  = "Explosão",
+    [7]  = "Montaria?",
+    [8]  = "Água",
+    [9]  = "Fogo",
+    [10] = "Gelo",
+    [11] = "Trovão",
+    [14] = "Tranquilizante",
+}
+
+function forceConditionDamage(condition)
+    if type(condition) ~= "number" then
+        return
+    end
+    force_flagelo_type = condition
+    enabled = true
+    
+
+end
+
+local _forcing_action = false
+
+_G.get_field = function(obj, name)
+    local td = obj:get_type_definition()
+    local f = td:get_field(name)
+    if not f then
+        return nil
+    end
+    return f:get_data(obj)
+end
+
+
+_G.set_field = function(obj, backing_name, value)
+    local td = obj:get_type_definition()
+    local prop = backing_name:match("<(.*)>k__BackingField")
+    if prop then
+        local setter_name = "set_" .. prop
+        local setter = td:get_method(setter_name)
+        if setter then
+            obj:call(setter_name, value)
+            return
+        end
+    end
+    local f = td:get_field(backing_name)
+    if f then
+        pcall(function() f:set_data(obj, value) end)
+    end
+end
+
+
+_G.force_action = function(enemy, category, no)
+    if _forcing_action then return end
+    _forcing_action = true
+
+    if not enemy or not sdk.is_managed_object(enemy) then
+        _forcing_action = false
+        return
+    end
+
+    local TD_Action = sdk.find_type_definition("snow.enemy.SetupActionData")
+    local action = TD_Action:create_instance()
+
+    local baseParam = get_field(action, "<BaseParam>k__BackingField")
+    if baseParam then
+        set_field(baseParam, "<Category>k__BackingField", category)
+        set_field(baseParam, "<No>k__BackingField", no)
+    end
+
+    local extend = get_field(action, "<ExtendParam>k__BackingField")
+    if extend then
+        set_field(extend, "<ActOverWriteUniqueNo>k__BackingField", 0)
+        set_field(extend, "<ActTuneUniqueVariationID>k__BackingField", 0)
+
+        local f = extend:get_type_definition():get_field("_ActSpecialFlag")
+        if f then pcall(function() f:set_data(extend, 0) end) end
+    end
+
+    local target = get_field(action, "<TargetParam>k__BackingField")
+    if target then
+        set_field(target, "<TurnAng>k__BackingField", 0.0)
+    end
+
+    pcall(function() enemy:call("requestActionSet", action) end)
+
+    local Acao1 = enemy:call("get_ActionParam()")
+    local No1 = Acao1:call("get_ActionNo()")
+
+    _forcing_action = false
+end
+
+
+
+ParaliseEnded = false
+local was_paralyzed = false
+
+function CheckParalyzeEnd(enemy_obj)
+    if not enemy_obj then 
+        return 
+    end
+
+   
+    local abnormal = enemy_obj:get_Field("_AbnormalStatus")
+    if not abnormal then 
+        return 
+    end
+
+
+    local slots = abnormal:get_Field("_StatusSlot")
+    if not slots then 
+        return 
+    end
+
+    local para_slot = slots[3]
+    if not para_slot then 
+        return 
+    end
+
+    local timer = para_slot:get_Field("<ActiveTimer>k__BackingField")
+    if timer == nil then 
+        return 
+    end
+
+    local is_paralyzed = timer > 0
+
+ 
+    if was_paralyzed and not is_paralyzed then
+        ParaliseEnded = true
+    end
+
+    was_paralyzed = is_paralyzed
+end
+
+
+
+do
+    local td = sdk.find_type_definition("snow.enemy.EnemyCharacterBase")
+    local m  = td and td:get_method("stockDamage")
+    if m then
+        sdk.hook(m,
+        function(args)
+            if not enabled then return end
+            if not force_flagelo_type then return end
+
+            local damage = sdk.to_managed_object(args[3])
+            if not damage then return end
+
+            local condition_type = force_flagelo_type
+            local value = 12000.0  
+
+            local ok = pcall(function()
+                damage:call("set_IsConditionDamage", true)
+                damage:call("set_IsStatusDamage", true)
+                damage:call("set_ConditionDamageType", condition_type)
+                damage:call("set_ConditionDamage", value)
+                damage:call("set_StatusEffectEmType", condition_type)
+            end)
+
+            if ok then
+                
+                -- consome o trigger
+                force_flagelo_type = nil
+                enabled = false
+            else
+            end
+
+            args[3] = sdk.to_ptr(damage)
+        end,
+        function(retval) return retval end
+    )
+    end
+end
+
+
+
+local target_env_effects = {
+    ["1000|1004"] = true,
+    ["1000|1005"] = true,
+    ["1000|1002"] = true,
+    ["1000|1103"] = true,
+    ["1000|1100"] = true,
+    ["1000|1103"] = true,
+    ["1000|1102"] = true,
+    ['1000|1101'] = true,
+}
+
+local colorCreator = sdk.create_instance("via.Color", true):add_ref()
+colorCreator:call(".cctor()")
+local color_map = {
+    Red       = colorCreator.Red,
+    Magenta   = colorCreator.Magenta,
+    Pink      = colorCreator.Pink,
+    DeepPink  = colorCreator.DeepPink,
+    LightPink = colorCreator.LightPink,
+    White     = colorCreator.White,
+    Black     = colorCreator.Black,
+    Cyan      = colorCreator.Cyan,
+    LightRed  = colorCreator.LightRed,
+    Crimson   = colorCreator.Crimson,
+    Orange    = colorCreator.Orange,
+    DarkGreen = colorCreator.DarkGreen,
+    ForestGreen = colorCreator.ForestGreen,
+    SeaGreen = colorCreator.SeaGreen,
+    LightGreen = colorCreator.LightGreen,
+    DarkOrange= colorCreator.DarkOrange,
+    Yellow    = colorCreator.Yellow,
+    Brown     = colorCreator.Brown,
+    Blue      = colorCreator.Blue,
+    LtGray    = colorCreator.LtGray,
+    DkGray    = colorCreator.DkGray,
+    LightBlue = colorCreator.LightBlue,
+    MidnightBlue = colorCreator.MidnightBlue,
+    Navy      = colorCreator.Navy,
+    SkyBlue   = colorCreator.SkyBlue,
+    DarkBlue  = colorCreator.DarkBlue,
+    RoyalBlue = colorCreator.RoyalBlue,
+    NoxiusPoison = sdk.create_instance("via.Color", true):add_ref():call(
+        "ctor(System.Single, System.Single, System.Single, System.Single)",
+        206/255, 6/255, 87/255, 1.0
+    )
+}
+
+local last_container_id = nil
+local last_element_id = nil
+local nextPaintRequest = nil   
+local pendingPaint = nil       
+
+do
+    local ObjectEffectManagerTD = sdk.find_type_definition("via.effect.script.ObjectEffectManager")
+    local methods = {
+        "requestEffect(via.effect.script.EffectID, via.GameObject, System.Int32, via.effect.script.EffectManager.WwiseTriggerInfo)",
+        "requestEffect(via.effect.script.EffectID, via.vec3, via.Quaternion, via.GameObject, System.String, via.effect.script.EffectManager.WwiseTriggerInfo)",
+        "requestEffect(via.effect.script.EffectID, via.vec3, via.Quaternion, via.mat4, via.GameObject, System.String, via.effect.script.EffectManager.WwiseTriggerInfo)",
+        "requestEffectInternal(via.effect.script.EffectID, via.GameObject, System.Int32, via.effect.script.EffectManager.WwiseTriggerInfo, via.effect.script.EffectManager.RequestOverwriteParam)"
+    }
+    for _, sig in ipairs(methods) do
+        local m = ObjectEffectManagerTD:get_method(sig)
+        if m then
+            sdk.hook(m,
+                function(args)
+                    local effectID = sdk.to_managed_object(args[3])
+                    if effectID then
+                        last_container_id = effectID.ContainerID
+                        last_element_id   = effectID.ElementID
+                    end
+                end,
+                function(retval) return retval end
+            )
+        end
+    end
+end
+
+sdk.hook(
+    sdk.find_type_definition("snow.SnowEffectManager"):get_method("eventBeforeCreateEffect(via.effect.script.EffectManager.BeforeCreateEffectInfo)"),
+    function(args)
+        if not nextPaintRequest then return end
+        local snowEffectManager = sdk.to_managed_object(args[3])
+        if not snowEffectManager then return end
+
+        local userSingleton = sdk.get_managed_singleton("snow.player.PlayerManager")
+        local user = userSingleton and userSingleton:findMasterPlayer()
+        local userObj = user and user:get_GameObject()
+        local caller = 2
+        if snowEffectManager:get_Owner() == userObj or snowEffectManager:get_FollowTarget() == userObj then
+            caller = 1
+        end
+        if caller ~= 2 then return end
+
+        local key = tostring(last_container_id) .. "|" .. tostring(last_element_id)
+        if target_env_effects[key] then
+            pendingPaint = {
+                key = key,
+                colors = nextPaintRequest.colors,
+                expire = os.clock() + 1.5,
+                speed = nextPaintRequest.speed
+            }
+            nextPaintRequest = nil
+        end
+    end,
+    function(retval) return retval end
+)
+sdk.hook(
+    sdk.find_type_definition("snow.SnowEffectManager"):get_method("eventAfterCreateEffect(via.effect.script.EffectManager.AfterCreateEffectInfo)"),
+    function(args)
+        if not pendingPaint then return end
+        if pendingPaint.expire and os.clock() > pendingPaint.expire then
+            pendingPaint = nil
+            return
+        end
+
+        local effectObject = sdk.to_managed_object(args[3])
+        if not effectObject then
+            pendingPaint = nil
+            return
+        end
+
+        local effectContainer = effectObject:get_Container()
+        if effectContainer then
+            if pendingPaint.speed then
+                pcall(function()
+                    if effectContainer.setPlaySpeed then
+                        effectContainer:setPlaySpeed(pendingPaint.speed)
+                    elseif effectContainer.set_Speed then
+                        effectContainer:set_Speed(pendingPaint.speed)
+                    elseif effectContainer.setSpeed then
+                        effectContainer:setSpeed(pendingPaint.speed)
+                    elseif effectContainer:get_type_definition():get_field("Speed") then
+                        effectContainer:set_field("Speed", pendingPaint.speed)
+                    else
+                    end
+                end)
+            end
+
+            for _, cname in ipairs(pendingPaint.colors) do
+                local c = color_map[cname]
+                if c then
+                    pcall(function() effectContainer:setRootColor(c) end)
+                end
+            end
+        end
+
+        pendingPaint = nil
+    end,
+    function(retval) return retval end
+)
+local function ajustar_damageFire(enemy)
+    if not enemy then return end
+    local damage_param = enemy:call("get_DamageParam")
+    if not damage_param then return end
+    local fire_param = damage_param:get_field("_FireParam")
+    if not fire_param then return end
+    if modified_fire_params[fire_param] then return end
+    local current_damage = fire_param:get_field("<Damage>k__BackingField")
+    local adjust_rate = fire_param:get_field("<FireDamageAdjustRateByEnemyLv>k__BackingField")
+    if not current_damage or current_damage <= 0 then return end
+    if not adjust_rate or adjust_rate <= 0 then return end
+    if original_fire_damage[enemy] == nil then
+        original_fire_damage[enemy] = current_damage
+    end
+
+    local novo_dano = current_damage + 5
+    fire_param:set_field("<Damage>k__BackingField", novo_dano)
+    modified_fire_params[fire_param] = true
+    
+
+end    
+
+local function ajustar_damageEintervaloWater(enemy)
+    if not enemy then return end
+    local damage_param = enemy:call("get_DamageParam")
+    if not damage_param then return end
+    local water_param = damage_param:get_field("_WaterParam")
+    if not water_param then return end
+    if modified_water_params[water_param] then return end
+    local poisonBaseAd = damage_param:get_field("_PoisonParam")
+    if not poisonBaseAd then return end
+    local adjust_rate = poisonBaseAd:get_field("<PoisonDamageAdjustRateByEnemyLv>k__BackingField")
+    if not adjust_rate or adjust_rate <= 0 then return end    
+    local novo_dano = 1.5 * adjust_rate 
+    water_param:set_field("<Damage>k__BackingField", 1)
+    water_param:set_field("<IsUseSlipDamage>k__BackingField",true)
+    water_param:call("set_IsUseSlipDamage()",true)
+    water_param:set_field("<DamageInterval>k__BackingField",0.5)
+    enemy:call("setEnemyMotSpeed(snow.enemy.EnemyDef.EnemyMotSpeedType, System.Single)",0,0.8)
+    enableW[water_param] = true
+    modified_water_params[water_param] = true
+
+
+end    
+
+
+
+local function ajustar_damage_interval(enemy, fator_multiplicador)
+    if not enemy then return end
+    local damage_param = enemy:call("get_DamageParam")
+    if not damage_param then return end
+    local poison_param = damage_param:get_field("_PoisonParam")
+ 
+    if not poison_param then return end
+   
+    
+
+    local atual = poison_param:call("get_DamageInterval")
+    if not atual then return end
+    if original_intervals[enemy] == nil then
+        original_intervals[enemy] = atual
+    end
+    local novo_valor = atual * fator_multiplicador
+
+    local limite_min = 0.05
+    if novo_valor < limite_min then novo_valor = limite_min end
+    poison_param:call("set_DamageInterval", novo_valor)
+
+end
+
+
+
+local function aumentar_dano_veneno(enemy, multiplicador)
+    if not enemy then return end
+    local damage_param = enemy:call("get_DamageParam")
+    if not damage_param then return end
+    local poison_param = damage_param:get_field("_PoisonParam")
+    if not poison_param then return end
+    if modified_poison_params[poison_param] then return end
+    local current_damage = poison_param:get_field("<Damage>k__BackingField")
+    local adjust_rate = poison_param:get_field("<PoisonDamageAdjustRateByEnemyLv>k__BackingField")
+    if not current_damage or current_damage <= 0 then return end
+    if not adjust_rate or adjust_rate <= 0 then return end
+    if original_poison_damage[enemy] == nil then
+        original_poison_damage[enemy] = current_damage
+    end
+    local novo_dano = current_damage * multiplicador
+    poison_param:set_field("<Damage>k__BackingField", novo_dano)
+    modified_poison_params[poison_param] = true
+end
+
+local function reset_poison_modifications(enemy)
+    if not enemy then return end
+    local damage_param = enemy:call("get_DamageParam")
+    if damage_param then
+        local poison_param = damage_param:get_field("_PoisonParam")
+        if poison_param then
+            if original_intervals[enemy] then
+                poison_param:call("set_DamageInterval", original_intervals[enemy])
+            end
+            if original_poison_damage[enemy] then
+                poison_param:set_field("<Damage>k__BackingField", original_poison_damage[enemy])
+            end
+            modified_poison_params[poison_param] = nil
+        end
+    end
+    original_intervals[enemy] = nil
+    original_poison_damage[enemy] = nil
+    venom_monitors[enemy] = nil
+end
+
+local paralyze_monitors = {}
+local paralyze_recasts = {} 
+
+local function is_paralysis_active(enemy)
+    local damage_param = enemy:call("get_DamageParam")
+    if not damage_param then return false end
+    local paralyze_param = damage_param:get_field("_ParalyzeParam")
+    if not paralyze_param then return false end
+    local active = paralyze_param:call("get_IsActive")
+    local timer = paralyze_param:call("get_ActiveTimer") or 0
+    return active and timer > 0
+end
+
+local function monitor_paralysis(enemy)
+    paralyze_monitors[enemy] = true
+
+end
+
+local pending_deactivates = {} 
+
+_G.force_action_after_delay = function(enemy, category, no_value, delay_seconds, cond)
+    if not enemy or not sdk.is_managed_object(enemy) then
+        return
+    end
+
+    if no_value == nil then
+        return
+    end
+
+    local frames_elapsed = 0
+    local frames_to_wait = math.floor(delay_seconds * 60)
+
+    local active = true
+
+    re.on_frame(function()
+        if not active then return end  
+
+        frames_elapsed = frames_elapsed + 1
+
+        if frames_elapsed >= frames_to_wait then
+
+            if cond then
+                SpawnConditionVisual(enemy, 0, "Orange", 0.1, 2.0, false, 2.5)
+            end
+
+            force_action(enemy, category, no_value)
+
+            active = false
+        end
+    end)
+end
+
+
+local function reset_fire_modifications(enemy)
+    if not enemy then return end
+    local damage_param = enemy:call("get_DamageParam")
+    if damage_param then
+        local fire_param = damage_param:get_field("_FireParam")
+        if fire_param then
+            if original_fire_damage[enemy] then
+                fire_param:call("set_Damage", original_fire_damage[enemy])
+            end
+            FireOk[enemy] = false
+            modified_fire_params[fire_param] = nil
+        end
+    end
+    
+    original_fire_damage[enemy] = nil
+
+end
+
+local function reset_ice_modifications(enemy)
+    if not enemy then return end
+    local damage_param = enemy:call("get_DamageParam")
+    if damage_param then
+        local Ice_param = damage_param:get_field("_IceParam")
+        if Ice_param then
+            Ice_param:call("set_MotionSpeedRate(System.Single)",IceMov[enemy])
+            if IceOk[enemy]then
+
+            end
+            IceMov[enemy] = nil
+            IceOk[enemy] = false
+        end
+    end
+    
+end
+
+local function reset_water_modifications(enemy)
+    if not enemy then return end
+    local damage_param = enemy:call("get_DamageParam")
+    if damage_param then
+        local water_param = damage_param:get_field("_WaterParam")
+        if water_param then
+            if enableW[enemy] == true then
+                water_param:set_field("<IsUseSlipDamage>k__BackingField",false)
+                enableW[enemy] = false
+                enemy:call("setEnemyMotSpeed(snow.enemy.EnemyDef.EnemyMotSpeedType, System.Single)",0,1.0)
+            end    
+            modified_water_params[enemy] = false
+        end
+    end  
+
+    
+end
+
+local function is_fire_ative(enemy)
+    local damage_param = enemy:call("get_DamageParam")
+    if not damage_param then return false end
+    local fire_param = damage_param:get_field("_FireParam")
+    if not fire_param then return false end
+    local active =  fire_param:call("get_IsActive")
+    local timer =   fire_param:call("get_ActiveTimer") or 0
+    return active and timer > 0
+
+end  
+
+local function is_ice_ative(enemy)
+    local damage_param = enemy:call("get_DamageParam")
+    if not damage_param then return false end
+    local ice_param = damage_param:get_field("_IceParam")
+    if not ice_param then return false end
+    local active =  ice_param:call("get_IsActive")
+    local timer =   ice_param:call("get_ActiveTimer") or 0
+    return active and timer > 0
+
+end  
+
+local function is_water_ative(enemy)
+    local damage_param = enemy:call("get_DamageParam")
+    if not damage_param then return false end
+    local water_param = damage_param:get_field("_WaterParam")
+    if not water_param then return false end
+    local active =  water_param:call("get_IsActive")
+    local timer =   water_param:call("get_ActiveTimer") or 0
+    return active and timer > 0
+
+end  
+
+local function is_poison_active(enemy)
+    local damage_param = enemy:call("get_DamageParam")
+    if not damage_param then return false end
+    local poison_param = damage_param:get_field("_PoisonParam")
+    if not poison_param then return false end
+    local active = poison_param:call("get_IsActive")
+    local timer = poison_param:call("get_ActiveTimer") or 0
+    return active and timer > 0
+end
+
+function StartCallNearBossEnemy(enemy, duration)
+    if not enemy or not duration then return end
+    IceOk[enemy] = true
+    NearBossTask[enemy] = {
+        start_time = os.clock(),
+        duration = duration
+    }
+
+end
+
+
+
+
+
+
+re.on_frame(function()
+    if not NearBossTask then return end
+
+    local now = os.clock()
+
+    for ownerEnemy, data in pairs(NearBossTask) do
+        if not ownerEnemy or not sdk.is_managed_object(ownerEnemy) then
+            NearBossTask[ownerEnemy] = nil
+        else
+            if (now - data.start_time) <= data.duration then
+
+                local ok, nearEnemy = pcall(function()
+                    return ownerEnemy:call("getNearBossEnemy()")
+                end)
+
+                if ok and nearEnemy and sdk.is_managed_object(nearEnemy) then
+                    local damage_param = nearEnemy:call("get_DamageParam")
+                    if damage_param then
+                        local ice_param = damage_param:get_field("_IceParam")
+                        if ice_param then
+                            pcall(function()
+                                ice_param:call(
+                                    "activate(snow.enemy.EnemyDef.ConditionDamageParamType)",
+                                    0
+                                )
+                            end)
+                        end
+                    end
+                end
+            else
+                NearBossTask[ownerEnemy] = nil
+            end
+        end
+    end
+end)
+function WatchEnemyActionCategory(enemy, duration)
+    if not enemy or not duration then return end
+
+    if enableWa[enemy] then return end
+
+    local now = os.clock()
+    if action_watch_cooldown[enemy] and now < action_watch_cooldown[enemy] then
+        return
+    end
+
+
+    ActionWatchTask[enemy] = {
+        start_time    = now,
+        duration      = duration,
+        last_category = -1,
+    }
+
+    enableWa[enemy] = true
+    ActionWatchSuppress[enemy] = nil
+
+end
+
+
+local function zero_and_capture_addlimit(enemy)
+    if not enemy or not sdk.is_managed_object(enemy) then return false end
+
+    local damage_param = enemy:call("get_DamageParam")
+    if not damage_param then return false end
+
+    local paralyze_param = damage_param:get_field("_ParalyzeParam")
+    if not paralyze_param then return false end
+
+    local old = paralyze_param:call("get_AddLimit")
+    if not old then return false end
+
+    local len = old:call("get_Length")
+    if len <= 0 then return false end
+
+    if not addL[enemy] then
+        addL[enemy] = {}
+        for i = 0, len - 1 do
+            addL[enemy][i] = old[i]  
+        end
+
+
+        
+    end
+
+    -- zera
+    local arr = sdk.create_managed_array("System.Single", len)
+    for i = 0, len - 1 do
+        arr[i] = 0.0
+    end
+
+    paralyze_param:call("set_AddLimit(System.Single[])", arr)
+
+    return true
+end
+local function restore_addlimit(enemy, paralyze_param)
+    if not enemy or not sdk.is_managed_object(enemy) then return false end
+    if not paralyze_param or not sdk.is_managed_object(paralyze_param) then return false end
+    if not addL or not addL[enemy] then
+        return false
+    end
+
+    local old = paralyze_param:call("get_AddLimit")
+    if not old then
+        return false
+    end
+
+    local len = old:get_Length()
+    if len <= 0 then return false end
+
+    local arr = sdk.create_managed_array("System.Single", len)
+
+    for i = 0, len - 1 do
+        local v = addL[enemy][i]
+
+        if type(v) ~= "number" or v ~= v or v == math.huge or v == -math.huge then
+            v = tonumber(old[i]) or 0.0
+        end
+
+        arr[i] = v
+    end
+
+    paralyze_param:call("set_AddLimit(System.Single[])", arr)
+
+  
+
+    addL[enemy] = nil
+
+    return true
+end
+
+
+function EnsureDamageStock(enemy)
+    if not enemy then return nil end
+
+    local params = enemy:call("get_DamageParam()")
+    if not params then return nil end
+
+    local st = params:call("get_DamageStock()")
+
+   
+    if st then
+        local count = st:get_field("_size")
+        if count and count > 0 then
+            return st
+        end
+    end
+
+
+    local stockType = sdk.find_type_definition(
+        "snow.enemy.EnemyDamageStockParam"
+    )
+    if not stockType then
+        return nil
+    end
+
+    local newStock = sdk.create_instance(stockType)
+    if not newStock then
+        return nil
+    end
+
+    
+    local listType = sdk.find_type_definition(
+        "System.Collections.Generic.List`1[snow.enemy.EnemyDamageStockParam]"
+    )
+    if not listType then
+        return nil
+    end
+
+    local list = sdk.create_instance(listType)
+    list:call("Add", newStock)
+
+
+    params:call(
+        "set_DamageStock(System.Collections.Generic.List`snow.enemy.EnemyDamageStockParam)",
+        list
+    )
+
+
+    return list
+end
+re.on_frame(function()
+    if not ActionWatchTask then return end
+    local now = os.clock()
+    for enemy, data in pairs(ActionWatchTask) do
+        if not enemy or not sdk.is_managed_object(enemy) then
+            ActionWatchTask[enemy] = nil
+        else
+            if (now - data.start_time) <= data.duration then
+
+                if ActionWatchSuppress[enemy] then
+                    if os.clock() - ActionWatchSuppress[enemy] < 0.3 then
+                        goto continue_enemy
+                    else
+                        ActionWatchSuppress[enemy] = nil
+                    end
+                end
+
+                local ok, actionParam = pcall(function()
+                    return enemy:call("get_ActionParam()")
+                end)
+
+                if ok and actionParam then
+                    local ok2, category = pcall(function()
+                        return actionParam:call("get_ActionCategory()")
+                    end)
+
+                    if ok2 then
+                        if category == 4 and data.last_category ~= 4 then
+                            ActionWatchSuppress[enemy] = os.clock()
+
+                            local dmg_param = enemy:call("get_DamageParam")
+                            if dmg_param then
+                                local paralyze_param = dmg_param:get_field("_ParalyzeParam")
+                                if paralyze_param then
+                                    if ParaTime[enemy] == nil then
+                                        ParaTime[enemy] = paralyze_param:call("get_ActiveTime()")
+                                    end
+                                    paralyze_param:call("set_ActiveTime", 0.1)
+                                    if not paralyze_cycle_done[enemy] then
+                                        zero_and_capture_addlimit(enemy)
+                                        contPA2[enemy] = true
+                                        paralyze_cycle_done[enemy] = false
+                                    end
+
+                                end    
+                                SpawnConditionVisual(enemy, 0, "Orange", 0.1, 0.8, false, 1.0)
+
+                                enemy:call(
+                                    "stockDirectConditionDamage(System.Single, snow.enemy.EnemyDef.ConditionDamageType)",
+                                    999.0,
+                                    0
+                                )
+
+                                ParalyzeByScript[enemy] = os.clock()
+                            end
+                        end
+                           
+                        data.last_category = category
+                    end
+                end
+            else
+            enableWa[enemy] = false
+            ActionWatchTask[enemy] = nil
+
+            action_watch_cooldown[enemy] = os.clock() + 1.0  -- ajuste: 0.5~1.5s
+            local dmg_param = enemy:call("get_DamageParam")
+            local paralyze_param 
+            if dmg_param and paralyze_param and ParaTime[enemy] then
+                local dura = paralyze_param:call("get_ActiveTime")
+                paralyze_param:call("set_ActiveTime", ParaTime[enemy])
+            end
+
+            if dmg_param and paralyze_param and ParaTime[enemy] then
+                paralyze_param:call("set_ActiveTime",ParaTime[enemy])
+                if contPA2[enemy] == true then
+                    restore_addlimit(enemy, paralyze_param)
+                    addL[enemy] = nil
+
+                    paralyze_cycle_done[enemy] = true
+                end
+
+
+            end 
+            end
+        end
+        ::continue_enemy::
+    end
+end)
+re.on_frame(function()
+    if not ActionWatchTaskPending then return end
+
+    local now = os.clock()
+
+    for enemy, data in pairs(ActionWatchTaskPending) do
+        if not enemy or not sdk.is_managed_object(enemy) then
+            ActionWatchTaskPending[enemy] = nil
+        elseif now >= data.when then
+            WatchEnemyActionCategory(enemy, data.duration)
+            ActionWatchTaskPending[enemy] = nil
+        end
+    end
+end)
+
+local timers = {}
+
+local function start_timer(seconds, on_finish, enemy)
+    local id = {}
+
+    timers[id] = {
+        start = os.clock(),
+        duration = seconds,
+        callback = on_finish,
+        enemy = enemy
+    }
+
+    return id
+end
+re.on_frame(function()
+    local now = os.clock()
+
+    for id, t in pairs(timers) do
+        if now - t.start >= t.duration then
+            if t.callback then
+                t.callback(t.enemy)
+            end
+
+            timers[id] = nil
+        end
+    end
+end)
+
+local function extend_paralyze_now(enemy_obj, extra_time)
+    if not enemy_obj or not sdk.is_managed_object(enemy_obj) then return false end
+
+    local dmg_param = enemy_obj:call("get_DamageParam")
+    if not dmg_param then return false end
+
+    local para_param = dmg_param:get_field("_ParalyzeParam")
+    if not para_param then return false end
+
+    local cur_time = para_param:call("get_ActiveTime()") or 0
+
+    para_param:call("set_IsActive", true)
+    para_param:call("set_ActiveTime", cur_time + extra_time)
+
+    return true, cur_time + extra_time
+end
+
+_G.onVenomHitDetected = function(category, damage, time, monster_name, monster_size, enemy_obj)
+
+
+
+    if not enemy_obj then return end
+
+    if category == "FORTE" then
+        ajustar_damage_interval(enemy_obj, 0.60)
+        aumentar_dano_veneno(enemy_obj, 1.41)
+        nextPaintRequest = { colors = {"Red", "Red"}, expire = os.clock() + 1.5, speed = 1.75 }
+        venom_monitors[enemy_obj] = true
+
+    elseif category == "MEDIO" then
+        ajustar_damage_interval(enemy_obj, 0.60)
+        aumentar_dano_veneno(enemy_obj, 1.16)
+
+        nextPaintRequest = { colors = {"LightRed", "LightRed"}, expire = os.clock() + 1.5, speed = 1.5 }
+        venom_monitors[enemy_obj] = true
+    end
+
+    if category == "FORTE0" then
+        paralyze_cycle_done[enemy_obj] = false
+        contPA2[enemy_obj] = false
+        nextPaintRequest = { colors = {"Orange", "Orange"}, expire = os.clock() + 1.5, speed = 2.5 }
+
+        local dmg_param = enemy_obj:call("get_DamageParam")
+        local paralyze_param = dmg_param:get_field("_ParalyzeParam")
+        local dura = paralyze_param:call("get_ActiveTime()") 
+        
+            if contPA2[enemy_obj] == false then
+           
+                action_watch_cooldown[enemy_obj] = os.clock() + 1.0
+                SpawnConditionVisual(enemy_obj, 0, "DkGray", 0.1, 0.8, false, (dura/2)+3+dura)
+             
+                ActionWatchTaskPending = ActionWatchTaskPending or {}
+                ActionWatchTaskPending[enemy_obj] = {
+                    when = os.clock() + 1.0,
+                    duration = (dura/2)+3+dura
+                }
+            end
+            paralyze_finished[enemy_obj] = true
+
+            caminho = 0
+
+        action_watch_cooldown[enemy_obj] = os.clock() + 1.0
+
+        caminho = 0
+       
+    elseif category == "MEDIO0" then
+        nextPaintRequest = { colors = {"LtGray", "LtGray"}, expire = os.clock() + 1.5, speed = 1.5 }
+
+        paralyze_finished[enemy_obj] = true
+        timerPA[enemy_obj] = true
+        
+        local dmg_param = enemy_obj:call("get_DamageParam")
+        local paralyze_param = dmg_param:get_field("_ParalyzeParam")
+        local dura = paralyze_param:call("get_ActiveTime()") 
+        
+
+        if contPA[enemy_obj] == false then
+            SpawnConditionVisual(enemy_obj, 2, "LtGray", 0.1, 1.5, false, dura + 10.0)
+            SpawnConditionVisual(enemy_obj, 3, "LtGray", 0.1, 1.5, false, dura + 10.0)
+
+
+            timerPA[enemy_obj] = true
+            start_timer(dura + 10.0, function(e)
+            if not e or not sdk.is_managed_object(e) then return end
+                timerPA[e] = false
+            end, enemy_obj)
+        end    
+
+    end
+
+
+    if category == "FORTE9" then
+        nextPaintRequest = { colors = {"Blue", "Blue"}, expire = os.clock() + 1.5, speed = 1.5 }
+        ajustar_damageFire(enemy_obj)
+        fire_monitors[enemy_obj]= true
+    elseif category == "MEDIO9" then
+        nextPaintRequest = { colors = {"DarkOrange", "DarkOrange"}, expire = os.clock() + 1.5, speed = 0.7 }
+        ajustar_damageFire(enemy_obj)
+        fire_monitors[enemy_obj]= true
+
+
+    end
+
+    
+    if category == "FORTE10" then
+        nextPaintRequest = { colors = {"White", "White"}, expire = os.clock() + 1.5, speed = 1.5 }
+        local damage_param = enemy_obj:call("get_DamageParam")
+        if damage_param then
+            local ice_param = damage_param:get_field("_IceParam")
+            if ice_param then
+                local ok, err = pcall(function()
+                    local mov = ice_param:call("get_MotionSpeedRate")
+                    if IceMov[enemy_obj] == nil then
+                        IceMov[enemy_obj] = mov
+                    end    
+                    ice_monitors[enemy_obj]= true
+                    ice_param:call("set_MotionSpeedRate(System.Single)",(mov*0.5))
+                    local tempo = ice_param:call("get_ActiveTime()")
+                    local quest = print_quest_level()
+                    if quest ~= 256 then 
+                        StartCallNearBossEnemy(enemy_obj, tempo)
+                    else
+                        ice_param:call("set_MotionSpeedRate(System.Single)",(mov*0.6))
+                    end    
+                end)
+                if ok then
+                else
+                end
+            else
+            end
+        else
+        end
+    elseif category == "MEDIO10" then
+        nextPaintRequest = { colors = {"White", "White"}, expire = os.clock() + 1.5, speed = 1.5 }
+        local damage_param = enemy_obj:call("get_DamageParam")
+        if damage_param then
+            local ice_param = damage_param:get_field("_IceParam")
+            if ice_param then
+                local ok, err = pcall(function()
+                    local mov = ice_param:call("get_MotionSpeedRate")
+                    if IceMov[enemy_obj] == nil then
+                        IceMov[enemy_obj] = mov
+                    end    
+                    ice_monitors[enemy_obj]= true
+
+                    ice_param:call("set_MotionSpeedRate(System.Single)",(mov*0.7))
+                end)
+                if ok then
+                else
+                end
+            else
+            end
+        else
+        end
+
+
+    end
+
+    if category == "FORTE8" then
+        nextPaintRequest = { colors = {"Orange", "Orange"}, expire = os.clock() + 1.5, speed = 0.6 }
+        water_monitors[enemy_obj] = true
+        enableW[enemy_obj] = true
+    elseif category == "MEDIO8" then
+        nextPaintRequest = { colors = {"Brown", "Brown"}, expire = os.clock() + 1.5, speed = 0.8 }
+        water_monitors[enemy_obj] = true
+
+    end
+
+    if category == "FORTE1" then
+        nextPaintRequest = { colors = {"Blue", "Blue"}, expire = os.clock() + 1.5, speed = 1.5 }
+        local damage_param = enemy_obj:call("get_DamageParam")
+        
+           
+    elseif category == "MEDIO1" then
+        nextPaintRequest = { colors = {"Orange", "Orange"}, expire = os.clock() + 1.5, speed = 0.5 }
+        enemy_obj:call("startMarionette")
+        local damage_param = enemy_obj:call("get_DamageParam")
+       
+
+    end
+
+
+    if category == "FORTE11" then
+        nextPaintRequest = { colors = {"DarkGreen", "DarkGreen"}, expire = os.clock() + 1.5, speed = 1.5 }
+        
+    elseif category == "MEDIO11" then
+        nextPaintRequest = { colors = {"Orange", "Orange"}, expire = os.clock() + 1.5, speed = 0.5 }
+       
+
+    end
+    
+
+    
+end
+
+re.on_frame(function()
+    if nextPaintRequest and nextPaintRequest.expire and os.clock() > nextPaintRequest.expire then
+        nextPaintRequest = nil
+    end
+    if pendingPaint and pendingPaint.expire and os.clock() > pendingPaint.expire then
+        pendingPaint = nil
+    end
+    for enemy, _ in pairs(venom_monitors) do
+        if not is_poison_active(enemy) then
+            reset_poison_modifications(enemy)
+        end
+        
+    end
+
+    for enemy, _ in pairs(fire_monitors) do
+        if not is_fire_ative(enemy)then
+            reset_fire_modifications(enemy)
+        end
+    end  
+    for enemy, _ in pairs(ice_monitors) do
+        if not is_ice_ative(enemy)then
+            reset_ice_modifications(enemy)
+        end
+    end 
+    for enemy, _ in pairs(water_monitors) do
+        if not is_water_ative(enemy)then
+            reset_water_modifications(enemy)
+        end
+    end 
+    
+end)
