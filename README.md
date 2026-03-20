@@ -7,7 +7,7 @@ This project is a Lua mod for Monster Hunter Rise using REFramework.
 - modifies elements/status behavior
 - increases efficacy
 - modifies visuals of elements/status
--![Example](screenshots/2026_01_17_230720.png)
+-![Example](screenshots/2026_01_17_230720.jpg)
 
 
 ## Technologies
